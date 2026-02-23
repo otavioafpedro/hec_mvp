@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL 15 + TimescaleDB + PostGIS ──────────────────────
+  db:
+    image: timescale/timescaledb-ha:pg15-latest
+    environment:
+      POSTGRES_USER: solarone
+      POSTGRES_PASSWORD: solarone_secret
+      POSTGRES_DB: validation_engine
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U solarone -d validation_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # PostGIS habilitado via migration 005: CREATE EXTENSION IF NOT EXISTS postgis
+
+  # ── Validation Engine API ────────────────────────────────────────
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      POSTGRES_USER: solarone
+      POSTGRES_PASSWORD: solarone_secret
+      POSTGRES_DB: validation_engine
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+volumes:
+  pgdata:

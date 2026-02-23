@@ -1,0 +1,389 @@
+"""
+Serviço IPFS — Upload e verificação de certificados HEC
+
+Sobe JSON canônico + PDF do certificado para IPFS e retorna CIDs.
+Na verificação, baixa do IPFS, recalcula SHA-256 e compara 100%.
+
+Providers (plugável — mesmo padrão do satellite_fetcher):
+  - MockIPFSProvider: armazena em memória para dev/test (padrão)
+  - PinataProvider: API Pinata (produção) [stub]
+  - LocalIPFSProvider: nó IPFS local via HTTP API [stub]
+
+Fluxo de upload:
+  1. Serializa JSON canônico (sort_keys, compact separators)
+  2. Upload JSON → CID_json
+  3. Upload PDF → CID_pdf
+  4. Retorna IPFSUploadResult com ambos CIDs
+
+Fluxo de verificação:
+  1. Baixa JSON do IPFS via CID
+  2. Recalcula SHA-256 do conteúdo baixado
+  3. Compara com hash armazenado
+  4. Resultado: match 100% ou TAMPERED
+
+Garantia de integridade:
+  - JSON é serializado de forma determinística (sort_keys=True)
+  - SHA-256 recalculado byte-a-byte
+  - Qualquer 1 bit alterado → hash diverge → TAMPERED
+"""
+import hashlib
+import json
+import uuid
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Optional, Dict
+
+
+# ---------------------------------------------------------------------------
+# Resultados
+# ---------------------------------------------------------------------------
+
+@dataclass
+class IPFSUploadResult:
+    """Resultado do upload para IPFS."""
+    json_cid: str           # CID do JSON canônico
+    pdf_cid: str            # CID do PDF
+    json_size_bytes: int    # Tamanho do JSON
+    pdf_size_bytes: int     # Tamanho do PDF
+    provider: str           # "mock" | "pinata" | "local"
+    pinned: bool            # True se conteúdo foi pinado
+
+
+@dataclass
+class IPFSVerifyResult:
+    """Resultado da verificação de integridade via IPFS."""
+    verified: bool              # True se hash bate 100%
+    hec_id: str                 # ID do certificado verificado
+    stored_hash: str            # Hash armazenado no DB
+    recalculated_hash: str      # Hash recalculado do IPFS
+    match: bool                 # stored_hash == recalculated_hash
+    json_cid: Optional[str]     # CID do JSON usado na verificação
+    pdf_cid: Optional[str]      # CID do PDF
+    json_size_bytes: int        # Tamanho do JSON baixado
+    ipfs_provider: str          # Provider usado
+    verified_at: str            # Timestamp da verificação
+    certificate_json: Optional[dict] = None  # JSON recuperado do IPFS
+    reason: str = ""            # Motivo se falhou
+
+
+# ---------------------------------------------------------------------------
+# Provider ABC
+# ---------------------------------------------------------------------------
+
+class IPFSProvider(ABC):
+    """Interface para providers IPFS."""
+
+    @abstractmethod
+    def upload(self, data: bytes, filename: str) -> str:
+        """Upload bytes para IPFS, retorna CID."""
+        ...
+
+    @abstractmethod
+    def download(self, cid: str) -> Optional[bytes]:
+        """Download bytes do IPFS por CID. None se não encontrado."""
+        ...
+
+    @abstractmethod
+    def pin(self, cid: str) -> bool:
+        """Pin CID no IPFS. Retorna True se sucesso."""
+        ...
+
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """Nome do provider."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Mock Provider (dev/test)
+# ---------------------------------------------------------------------------
+
+class MockIPFSProvider(IPFSProvider):
+    """
+    Provider IPFS mock — armazena em memória.
+
+    Gera CIDs determinísticos baseados em SHA-256 do conteúdo.
+    Formato: Qm + hex[:44] (simulando CIDv0 IPFS).
+    """
+
+    def __init__(self):
+        self._store: Dict[str, bytes] = {}
+        self._pinned: set = set()
+
+    def upload(self, data: bytes, filename: str) -> str:
+        content_hash = hashlib.sha256(data).hexdigest()
+        cid = f"Qm{content_hash[:44]}"
+        self._store[cid] = data
+        return cid
+
+    def download(self, cid: str) -> Optional[bytes]:
+        return self._store.get(cid)
+
+    def pin(self, cid: str) -> bool:
+        if cid in self._store:
+            self._pinned.add(cid)
+            return True
+        return False
+
+    @property
+    def name(self) -> str:
+        return "mock"
+
+    def clear(self):
+        """Limpa o store (para testes)."""
+        self._store.clear()
+        self._pinned.clear()
+
+    @property
+    def store_size(self) -> int:
+        return len(self._store)
+
+
+class TamperedMockIPFSProvider(MockIPFSProvider):
+    """
+    Provider mock que simula adulteração — altera 1 byte no download.
+
+    Usado exclusivamente para testar detecção de tampering.
+    """
+
+    def download(self, cid: str) -> Optional[bytes]:
+        data = self._store.get(cid)
+        if data and len(data) > 10:
+            # Flip 1 bit no byte 10 — simula adulteração
+            tampered = bytearray(data)
+            tampered[10] = (tampered[10] + 1) % 256
+            return bytes(tampered)
+        return data
+
+
+class MissingMockIPFSProvider(MockIPFSProvider):
+    """Provider mock que simula CID não encontrado no IPFS."""
+
+    def download(self, cid: str) -> Optional[bytes]:
+        return None  # Sempre retorna None
+
+
+# ---------------------------------------------------------------------------
+# Pinata Provider (production stub)
+# ---------------------------------------------------------------------------
+
+class PinataProvider(IPFSProvider):
+    """
+    Provider Pinata — stub para produção.
+
+    Em produção real, usa pinata.cloud API:
+      POST https://api.pinata.cloud/pinning/pinFileToIPFS
+      Authorization: Bearer JWT_TOKEN
+    """
+
+    def __init__(self, api_key: str = "", secret: str = ""):
+        self._api_key = api_key
+        self._secret = secret
+
+    def upload(self, data: bytes, filename: str) -> str:
+        # TODO: implementar chamada real à API Pinata
+        raise NotImplementedError("PinataProvider não implementado — use MockIPFSProvider")
+
+    def download(self, cid: str) -> Optional[bytes]:
+        # TODO: GET https://gateway.pinata.cloud/ipfs/{cid}
+        raise NotImplementedError("PinataProvider download não implementado")
+
+    def pin(self, cid: str) -> bool:
+        raise NotImplementedError("PinataProvider pin não implementado")
+
+    @property
+    def name(self) -> str:
+        return "pinata"
+
+
+# ---------------------------------------------------------------------------
+# Local IPFS Node Provider (production stub)
+# ---------------------------------------------------------------------------
+
+class LocalIPFSProvider(IPFSProvider):
+    """
+    Provider para nó IPFS local.
+
+    Em produção real, usa HTTP API do nó IPFS:
+      POST http://localhost:5001/api/v0/add
+      POST http://localhost:5001/api/v0/cat?arg={cid}
+    """
+
+    def __init__(self, api_url: str = "http://localhost:5001"):
+        self._api_url = api_url
+
+    def upload(self, data: bytes, filename: str) -> str:
+        raise NotImplementedError("LocalIPFSProvider não implementado")
+
+    def download(self, cid: str) -> Optional[bytes]:
+        raise NotImplementedError("LocalIPFSProvider download não implementado")
+
+    def pin(self, cid: str) -> bool:
+        raise NotImplementedError("LocalIPFSProvider pin não implementado")
+
+    @property
+    def name(self) -> str:
+        return "local"
+
+
+# ---------------------------------------------------------------------------
+# Singleton provider (injetável para testes)
+# ---------------------------------------------------------------------------
+
+_ipfs_provider: IPFSProvider = MockIPFSProvider()
+
+
+def get_ipfs_provider() -> IPFSProvider:
+    return _ipfs_provider
+
+
+def set_ipfs_provider(provider: IPFSProvider) -> None:
+    global _ipfs_provider
+    _ipfs_provider = provider
+
+
+def reset_ipfs_provider() -> None:
+    global _ipfs_provider
+    _ipfs_provider = MockIPFSProvider()
+
+
+# ---------------------------------------------------------------------------
+# Upload JSON + PDF to IPFS
+# ---------------------------------------------------------------------------
+
+def upload_certificate_to_ipfs(
+    certificate_json: dict,
+    pdf_bytes: bytes,
+    hec_id: str,
+    provider: Optional[IPFSProvider] = None,
+) -> IPFSUploadResult:
+    """
+    Upload JSON canônico + PDF do certificado para IPFS.
+
+    Args:
+        certificate_json: JSON do certificado HEC
+        pdf_bytes: PDF binário do certificado
+        hec_id: ID do certificado (para filenames)
+        provider: Provider IPFS (default: singleton)
+
+    Returns:
+        IPFSUploadResult com CIDs do JSON e PDF
+    """
+    prov = provider or get_ipfs_provider()
+
+    # Serializar JSON de forma determinística (mesmo que compute_certificate_hash)
+    json_bytes = json.dumps(
+        certificate_json,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+
+    # Upload JSON
+    json_cid = prov.upload(json_bytes, f"hec-{hec_id}.json")
+    prov.pin(json_cid)
+
+    # Upload PDF
+    pdf_cid = prov.upload(pdf_bytes, f"hec-{hec_id}.pdf")
+    prov.pin(pdf_cid)
+
+    return IPFSUploadResult(
+        json_cid=json_cid,
+        pdf_cid=pdf_cid,
+        json_size_bytes=len(json_bytes),
+        pdf_size_bytes=len(pdf_bytes),
+        provider=prov.name,
+        pinned=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Download and verify from IPFS
+# ---------------------------------------------------------------------------
+
+def verify_certificate_from_ipfs(
+    hec_id: str,
+    stored_hash: str,
+    json_cid: str,
+    pdf_cid: Optional[str] = None,
+    provider: Optional[IPFSProvider] = None,
+) -> IPFSVerifyResult:
+    """
+    Verifica integridade do certificado HEC via IPFS.
+
+    Pipeline:
+      1. Baixa JSON canônico do IPFS via CID
+      2. Recalcula SHA-256 dos bytes baixados
+      3. Compara com hash armazenado no DB
+      4. Match 100% = VERIFIED, qualquer divergência = TAMPERED
+
+    Args:
+        hec_id: ID do certificado
+        stored_hash: SHA-256 armazenado no DB
+        json_cid: CID do JSON no IPFS
+        pdf_cid: CID do PDF (opcional, para referência)
+        provider: Provider IPFS (default: singleton)
+
+    Returns:
+        IPFSVerifyResult com resultado da verificação
+    """
+    prov = provider or get_ipfs_provider()
+    now = datetime.now(timezone.utc).isoformat() + "Z"
+
+    # 1. Download JSON from IPFS
+    json_bytes = prov.download(json_cid)
+
+    if json_bytes is None:
+        return IPFSVerifyResult(
+            verified=False,
+            hec_id=hec_id,
+            stored_hash=stored_hash,
+            recalculated_hash="",
+            match=False,
+            json_cid=json_cid,
+            pdf_cid=pdf_cid,
+            json_size_bytes=0,
+            ipfs_provider=prov.name,
+            verified_at=now,
+            reason=f"JSON não encontrado no IPFS (CID: {json_cid})",
+        )
+
+    # 2. Recalculate SHA-256 from downloaded bytes
+    recalculated_hash = hashlib.sha256(json_bytes).hexdigest()
+
+    # 3. Compare with stored hash
+    match = recalculated_hash == stored_hash
+
+    # 4. Parse JSON for response
+    cert_json = None
+    try:
+        cert_json = json.loads(json_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        pass
+
+    reason = ""
+    if match:
+        reason = "VERIFIED — Hash IPFS bate 100% com hash armazenado"
+    else:
+        reason = (
+            f"TAMPERED — Hash diverge! "
+            f"Armazenado: {stored_hash[:16]}..., "
+            f"IPFS: {recalculated_hash[:16]}..."
+        )
+
+    return IPFSVerifyResult(
+        verified=match,
+        hec_id=hec_id,
+        stored_hash=stored_hash,
+        recalculated_hash=recalculated_hash,
+        match=match,
+        json_cid=json_cid,
+        pdf_cid=pdf_cid,
+        json_size_bytes=len(json_bytes),
+        ipfs_provider=prov.name,
+        verified_at=now,
+        certificate_json=cert_json,
+        reason=reason,
+    )
