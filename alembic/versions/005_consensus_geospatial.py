@@ -49,7 +49,7 @@ def upgrade() -> None:
     op.execute("""
         CREATE INDEX IF NOT EXISTS idx_plants_geom
         ON plants USING GIST (
-            ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography
+            (ST_SetSRID(ST_MakePoint(lng, lat), 4326)::geography)
         )
     """)
 

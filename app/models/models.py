@@ -54,7 +54,7 @@ class Telemetry(Base):
     temperature_c = Column(Numeric(6, 2), nullable=True)
     irradiance_wm2 = Column(Numeric(8, 2), nullable=True, comment="Irradiância W/m²")
     source = Column(String(50), nullable=False, default="mqtt", comment="mqtt | api | manual")
-    pre_commitment_hash = Column(String(128), nullable=True, comment="ECDSA pre-commitment hash")
+    pre_commitment_hash = Column(String(256), nullable=True, comment="ECDSA pre-commitment hash")
     ntp_delta_ms = Column(Float, nullable=True, comment="Delta NTP em ms")
     ntp_pass = Column(Boolean, nullable=True, comment="True se |drift| <= 5ms (Camada 2 NTP Blindada)")
     raw_payload = Column(JSONB, nullable=True, comment="Payload bruto do inversor")
