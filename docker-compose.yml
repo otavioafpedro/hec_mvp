@@ -1,7 +1,7 @@
 version: "3.9"
 
 services:
-  # ── PostgreSQL 15 + TimescaleDB + PostGIS ──────────────────────
+  # PostgreSQL + TimescaleDB (legacy tables + sql_hec_soa/postgres_timeseries.sql)
   db:
     image: timescale/timescaledb-ha:pg15-latest
     environment:
@@ -12,14 +12,39 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./sql_hec_soa/postgres_timeseries.sql:/docker-entrypoint-initdb.d/20_postgres_timeseries.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U solarone -d validation_engine"]
       interval: 5s
       timeout: 5s
-      retries: 10
-    # PostGIS habilitado via migration 005: CREATE EXTENSION IF NOT EXISTS postgis
+      retries: 15
 
-  # ── Validation Engine API ────────────────────────────────────────
+  # MariaDB transactional schema from sql_hec_soa/mysql_schema.sql
+  mariadb:
+    image: mariadb:10.11
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MARIADB_ROOT_PASSWORD: root_secret
+      MARIADB_DATABASE: soa_sos
+      MARIADB_USER: solarone
+      MARIADB_PASSWORD: solarone_secret
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+      - ./sql_hec_soa/mysql_schema.sql:/docker-entrypoint-initdb.d/10_mysql_schema.sql:ro
+      - ./sql_hec_soa/mysql_seed_minimal.sql:/docker-entrypoint-initdb.d/11_mysql_seed_minimal.sql:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mariadb-admin ping -h 127.0.0.1 -u$$MARIADB_USER -p$$MARIADB_PASSWORD --silent",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Validation Engine API
   api:
     build: .
     ports:
@@ -30,11 +55,26 @@ services:
       POSTGRES_DB: validation_engine
       POSTGRES_HOST: db
       POSTGRES_PORT: "5432"
+
+      SOA_ENABLE_INGEST: "true"
+      SOA_MYSQL_USER: solarone
+      SOA_MYSQL_PASSWORD: solarone_secret
+      SOA_MYSQL_DB: soa_sos
+      SOA_MYSQL_HOST: mariadb
+      SOA_MYSQL_PORT: "3306"
+      SOA_TIMESERIES_USER: solarone
+      SOA_TIMESERIES_PASSWORD: solarone_secret
+      SOA_TIMESERIES_DB: validation_engine
+      SOA_TIMESERIES_HOST: db
+      SOA_TIMESERIES_PORT: "5432"
     depends_on:
       db:
+        condition: service_healthy
+      mariadb:
         condition: service_healthy
     volumes:
       - .:/app
 
 volumes:
   pgdata:
+  mariadb_data:
