@@ -4,6 +4,11 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Validation Engine - Solar One HUB"
     VERSION: str = "0.1.0"
+    SERVICE_LAYER: str = "api"
+    RUN_DB_MIGRATIONS_ON_BOOT: bool = False
+    WORKER_POLL_SECONDS: int = 20
+    WORKER_BATCH_SIZE: int = 50
+    DS_LOOKBACK_HOURS: int = 24
 
     # Legacy PostgreSQL (validation-engine schema)
     POSTGRES_USER: str = "solarone"
@@ -11,6 +16,7 @@ class Settings(BaseSettings):
     POSTGRES_DB: str = "validation_engine"
     POSTGRES_HOST: str = "db"
     POSTGRES_PORT: int = 5432
+    POSTGRES_DSN: str | None = None
 
     # SOA ingest feature flag (MariaDB + Timeseries split)
     SOA_ENABLE_INGEST: bool = False
@@ -33,6 +39,8 @@ class Settings(BaseSettings):
 
     @property
     def DATABASE_URL(self) -> str:
+        if self.POSTGRES_DSN:
+            return self.POSTGRES_DSN
         return (
             f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
