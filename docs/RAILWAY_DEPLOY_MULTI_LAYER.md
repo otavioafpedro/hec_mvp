@@ -86,6 +86,7 @@ Notas:
 
 ```bash
 curl https://<api-core>/health
+curl https://<api-core>/integrations/status
 ```
 
 ### Ingestao inverter (SOA)
@@ -114,3 +115,23 @@ Nos workers, procure logs:
 - `burn_batch_processed`
 
 Se houver falha, o worker loga `worker_cycle_failed` com stacktrace.
+
+## Integracoes externas portadas do SOA gateway
+
+As seguintes fontes agora estao no `hec_mvp` em `app/integrations/*`:
+- Solcast (S1)
+- NASA POWER fallback (S2 satelite)
+- INMET + OpenWeather (S3 clima)
+- Electricity Maps (ESG)
+
+Variaveis opcionais no Railway:
+
+```bash
+SOLCAST_API_KEY=
+COPERNICUS_CLIENT_ID=
+COPERNICUS_CLIENT_SECRET=
+OPENWEATHER_API_KEY=
+ELECTRICITY_MAPS_KEY=
+DEFAULT_GRID_ZONE=BR-CS
+DS_ENABLE_EXTERNAL_FETCH=true
+```

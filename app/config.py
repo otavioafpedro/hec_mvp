@@ -9,6 +9,24 @@ class Settings(BaseSettings):
     WORKER_POLL_SECONDS: int = 20
     WORKER_BATCH_SIZE: int = 50
     DS_LOOKBACK_HOURS: int = 24
+    DS_ENABLE_EXTERNAL_FETCH: bool = True
+    DEFAULT_GRID_ZONE: str = "BR-CS"
+
+    # External integrations (ported from SOA gateway)
+    SOLCAST_API_KEY: str = ""
+    SOLCAST_BASE_URL: str = "https://api.solcast.com.au"
+
+    COPERNICUS_CLIENT_ID: str = ""
+    COPERNICUS_CLIENT_SECRET: str = ""
+    NASA_POWER_BASE_URL: str = "https://power.larc.nasa.gov/api"
+
+    INMET_BASE_URL: str = "https://apitempo.inmet.gov.br"
+
+    OPENWEATHER_API_KEY: str = ""
+    OPENWEATHER_BASE_URL: str = "https://api.openweathermap.org/data/3.0"
+
+    ELECTRICITY_MAPS_KEY: str = ""
+    ELECTRICITY_MAPS_URL: str = "https://api.electricitymap.org/v3"
 
     # Legacy PostgreSQL (validation-engine schema)
     POSTGRES_USER: str = "solarone"
