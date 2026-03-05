@@ -21,6 +21,13 @@ class Plant(Base):
     name = Column(String(255), nullable=False)
     absolar_id = Column(String(100), unique=True, nullable=True, comment="ID ABSOLAR associado")
     owner_name = Column(String(255), nullable=True)
+    owner_user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        nullable=True,
+        index=True,
+        comment="Usuario dono da usina (onboarding gerador)",
+    )
     lat = Column(Float, nullable=False)
     lng = Column(Float, nullable=False)
     capacity_kw = Column(Numeric(12, 3), nullable=False, comment="Potência instalada kWp")
@@ -37,6 +44,8 @@ class Plant(Base):
     # Relationships
     telemetry = relationship("Telemetry", back_populates="plant", cascade="all, delete-orphan")
     validations = relationship("Validation", back_populates="plant", cascade="all, delete-orphan")
+    owner = relationship("User", back_populates="plants")
+    generator_connections = relationship("GeneratorInverterConnection", back_populates="plant")
 
 
 # ---------------------------------------------------------------------------
@@ -253,10 +262,105 @@ class User(Base):
                            cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="buyer")
     burns = relationship("BurnCertificate", back_populates="user")
+    generator_profile = relationship(
+        "GeneratorProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    plants = relationship("Plant", back_populates="owner")
 
 
 # ---------------------------------------------------------------------------
-# WALLETS — Carteira digital do usuário
+# GENERATOR_PROFILES - Cadastro de geradores (PF/PJ) e aceite de cessao
+# ---------------------------------------------------------------------------
+class GeneratorProfile(Base):
+    __tablename__ = "generator_profiles"
+
+    profile_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    person_type = Column(String(2), nullable=False, comment="PF | PJ")
+    document_id = Column(String(32), unique=True, nullable=False, comment="CPF/CNPJ normalizado")
+    legal_name = Column(String(255), nullable=True, comment="Razao social (PJ)")
+    trade_name = Column(String(255), nullable=True, comment="Nome fantasia")
+    phone = Column(String(30), nullable=True)
+    attribute_assignment_accepted = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="Aceite da cessao do atributo ambiental da energia",
+    )
+    assignment_accepted_at = Column(DateTime, nullable=True)
+    onboarding_status = Column(
+        String(30),
+        nullable=False,
+        default="draft",
+        comment="draft | profile_completed | integration_pending | active | suspended",
+    )
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="generator_profile")
+    inverter_connections = relationship(
+        "GeneratorInverterConnection",
+        back_populates="profile",
+        cascade="all, delete-orphan",
+    )
+
+
+class GeneratorInverterConnection(Base):
+    __tablename__ = "generator_inverter_connections"
+
+    connection_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    profile_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("generator_profiles.profile_id"),
+        nullable=False,
+        index=True,
+    )
+    plant_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("plants.plant_id"),
+        nullable=True,
+        index=True,
+    )
+    provider_name = Column(String(100), nullable=False, comment="Marca/plataforma do inversor")
+    integration_mode = Column(
+        String(30),
+        nullable=False,
+        comment="direct_api | vendor_partner",
+    )
+    external_account_ref = Column(String(255), nullable=True, comment="Conta/tenant no provedor")
+    inverter_serial = Column(String(100), nullable=True)
+    consent_accepted = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="Aceite para leitura de dados de geracao",
+    )
+    consented_at = Column(DateTime, nullable=True)
+    connection_status = Column(
+        String(20),
+        nullable=False,
+        default="pending",
+        comment="pending | connected | failed | revoked",
+    )
+    last_sync_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    profile = relationship("GeneratorProfile", back_populates="inverter_connections")
+    plant = relationship("Plant", back_populates="generator_connections")
+
+
+# ---------------------------------------------------------------------------
+# WALLETS - Carteira digital do usuario
 # ---------------------------------------------------------------------------
 class Wallet(Base):
     __tablename__ = "wallets"
@@ -346,3 +450,4 @@ class BurnCertificate(Base):
 
     # Relationships
     user = relationship("User", back_populates="burns")
+

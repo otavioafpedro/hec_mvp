@@ -87,6 +87,27 @@ Notas:
 ```bash
 curl https://<api-core>/health
 curl https://<api-core>/integrations/status
+curl -X POST https://<api-core>/generator-onboarding/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email":"gerador.demo@solarone.com",
+    "name":"Gerador Demo",
+    "password":"demo123",
+    "person_type":"PF",
+    "document_id":"12345678901",
+    "attribute_assignment_accepted":true,
+    "plant":{
+      "name":"Usina Demo",
+      "lat":-23.55,
+      "lng":-46.63,
+      "capacity_kw":75
+    },
+    "inverter_connection":{
+      "provider_name":"growatt",
+      "integration_mode":"direct_api",
+      "consent_accepted":true
+    }
+  }'
 ```
 
 ### Ingestao inverter (SOA)
