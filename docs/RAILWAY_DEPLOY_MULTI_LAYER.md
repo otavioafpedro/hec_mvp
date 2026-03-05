@@ -108,6 +108,27 @@ curl -X POST https://<api-core>/generator-onboarding/register \
       "consent_accepted":true
     }
   }'
+
+# conta consumidora existente vira gerador mantendo o mesmo user/token
+curl -X POST https://<api-core>/generator-onboarding/activate \
+  -H "Authorization: Bearer <token-consumidor>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "person_type":"PF",
+    "document_id":"98765432100",
+    "attribute_assignment_accepted":true,
+    "plant":{
+      "name":"Usina Existente",
+      "lat":-23.55,
+      "lng":-46.63,
+      "capacity_kw":55
+    },
+    "inverter_connection":{
+      "provider_name":"sungrow",
+      "integration_mode":"vendor_partner",
+      "consent_accepted":true
+    }
+  }'
 ```
 
 ### Ingestao inverter (SOA)

@@ -163,3 +163,86 @@ def test_generator_add_connection_without_consent_422(client, db_session):
     )
     assert add.status_code == 422
     assert "consent_accepted" in add.json()["detail"]
+
+
+def test_activate_generator_profile_for_existing_consumer_201(client, db_session):
+    reg = client.post(
+        "/marketplace/register",
+        json={
+            "email": f"consumer_{uuid.uuid4().hex[:6]}@test.com",
+            "name": "Consumidor",
+            "password": "test123",
+        },
+    )
+    assert reg.status_code == 201
+    token = reg.json()["token"]
+    user_id = reg.json()["user_id"]
+
+    activate = client.post(
+        "/generator-onboarding/activate",
+        headers=_auth_header(token),
+        json={
+            "person_type": "PF",
+            "document_id": "98765432100",
+            "phone": "+55 11 90000-0000",
+            "attribute_assignment_accepted": True,
+            "plant": {
+                "name": f"Usina Ativada {uuid.uuid4().hex[:5]}",
+                "lat": -22.90,
+                "lng": -43.20,
+                "capacity_kw": 55.0,
+            },
+            "inverter_connection": {
+                "provider_name": "sungrow",
+                "integration_mode": "vendor_partner",
+                "consent_accepted": True,
+            },
+        },
+    )
+    assert activate.status_code == 201
+    data = activate.json()
+    assert data["user_id"] == user_id
+    assert data["person_type"] == "PF"
+    assert data["onboarding_status"] == "integration_pending"
+    assert len(data["connections"]) == 1
+
+    me = client.get("/generator-onboarding/me", headers=_auth_header(token))
+    assert me.status_code == 200
+    assert me.json()["user_id"] == user_id
+
+
+def test_activate_generator_profile_twice_409(client, db_session):
+    reg = client.post(
+        "/marketplace/register",
+        json={
+            "email": f"consumer2_{uuid.uuid4().hex[:6]}@test.com",
+            "name": "Consumidor 2",
+            "password": "test123",
+        },
+    )
+    assert reg.status_code == 201
+    token = reg.json()["token"]
+
+    payload = {
+        "person_type": "PF",
+        "document_id": "12312312399",
+        "attribute_assignment_accepted": True,
+        "plant": {
+            "name": "Usina Repeticao",
+            "lat": -23.0,
+            "lng": -46.0,
+            "capacity_kw": 70.0,
+        },
+        "inverter_connection": {
+            "provider_name": "growatt",
+            "integration_mode": "direct_api",
+            "consent_accepted": True,
+        },
+    }
+
+    first = client.post("/generator-onboarding/activate", headers=_auth_header(token), json=payload)
+    assert first.status_code == 201
+
+    second = client.post("/generator-onboarding/activate", headers=_auth_header(token), json=payload)
+    assert second.status_code == 409
+    assert "ja possui perfil de gerador" in second.json()["detail"]

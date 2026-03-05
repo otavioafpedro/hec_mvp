@@ -15,6 +15,7 @@ from app.models.models import (
 )
 from app.schemas.generator_onboarding import (
     AddGeneratorConnectionRequest,
+    GeneratorActivateRequest,
     GeneratorConnectionResponse,
     GeneratorOnboardingResponse,
     GeneratorRegisterRequest,
@@ -75,6 +76,68 @@ def _build_response(
     )
 
 
+def _create_onboarding_entities(
+    db: Session,
+    user: User,
+    payload: GeneratorRegisterRequest | GeneratorActivateRequest,
+):
+    document_id = _normalize_document(payload.document_id)
+    existing_doc = (
+        db.query(GeneratorProfile)
+        .filter(GeneratorProfile.document_id == document_id)
+        .first()
+    )
+    if existing_doc and existing_doc.user_id != user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Documento {document_id} ja cadastrado para outro gerador",
+        )
+
+    now = datetime.utcnow()
+    plant = Plant(
+        name=payload.plant.name,
+        absolar_id=payload.plant.absolar_id,
+        owner_name=payload.legal_name or user.name,
+        owner_user_id=user.user_id,
+        lat=payload.plant.lat,
+        lng=payload.plant.lng,
+        capacity_kw=payload.plant.capacity_kw,
+        status="pending",
+        inverter_brand=payload.plant.inverter_brand,
+        inverter_model=payload.plant.inverter_model,
+    )
+    db.add(plant)
+    db.flush()
+
+    profile = GeneratorProfile(
+        user_id=user.user_id,
+        person_type=payload.person_type,
+        document_id=document_id,
+        legal_name=payload.legal_name,
+        trade_name=payload.trade_name,
+        phone=payload.phone,
+        attribute_assignment_accepted=True,
+        assignment_accepted_at=now,
+        onboarding_status="integration_pending",
+    )
+    db.add(profile)
+    db.flush()
+
+    connection = GeneratorInverterConnection(
+        profile_id=profile.profile_id,
+        plant_id=plant.plant_id,
+        provider_name=payload.inverter_connection.provider_name,
+        integration_mode=payload.inverter_connection.integration_mode,
+        external_account_ref=payload.inverter_connection.external_account_ref,
+        inverter_serial=payload.inverter_connection.inverter_serial,
+        consent_accepted=True,
+        consented_at=now,
+        connection_status="pending",
+    )
+    db.add(connection)
+    return profile, plant, connection
+
+
 def get_current_user(
     authorization: str = Header(None, description="Token: Bearer <token>"),
     db: Session = Depends(get_db),
@@ -109,19 +172,6 @@ def get_current_user(
     summary="Cadastrar gerador (PF/PJ) + iniciar onboarding de inversor",
 )
 def register_generator(req: GeneratorRegisterRequest, db: Session = Depends(get_db)):
-    document_id = _normalize_document(req.document_id)
-    existing_doc = (
-        db.query(GeneratorProfile)
-        .filter(GeneratorProfile.document_id == document_id)
-        .first()
-    )
-    if existing_doc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Documento {document_id} ja cadastrado para outro gerador",
-        )
-
-    now = datetime.utcnow()
     try:
         user, _, token = register_user(
             db=db,
@@ -130,48 +180,7 @@ def register_generator(req: GeneratorRegisterRequest, db: Session = Depends(get_
             password=req.password,
             role="seller",
         )
-
-        plant = Plant(
-            name=req.plant.name,
-            absolar_id=req.plant.absolar_id,
-            owner_name=req.legal_name or req.name,
-            owner_user_id=user.user_id,
-            lat=req.plant.lat,
-            lng=req.plant.lng,
-            capacity_kw=req.plant.capacity_kw,
-            status="pending",
-            inverter_brand=req.plant.inverter_brand,
-            inverter_model=req.plant.inverter_model,
-        )
-        db.add(plant)
-        db.flush()
-
-        profile = GeneratorProfile(
-            user_id=user.user_id,
-            person_type=req.person_type,
-            document_id=document_id,
-            legal_name=req.legal_name,
-            trade_name=req.trade_name,
-            phone=req.phone,
-            attribute_assignment_accepted=True,
-            assignment_accepted_at=now,
-            onboarding_status="integration_pending",
-        )
-        db.add(profile)
-        db.flush()
-
-        connection = GeneratorInverterConnection(
-            profile_id=profile.profile_id,
-            plant_id=plant.plant_id,
-            provider_name=req.inverter_connection.provider_name,
-            integration_mode=req.inverter_connection.integration_mode,
-            external_account_ref=req.inverter_connection.external_account_ref,
-            inverter_serial=req.inverter_connection.inverter_serial,
-            consent_accepted=True,
-            consented_at=now,
-            connection_status="pending",
-        )
-        db.add(connection)
+        profile, plant, connection = _create_onboarding_entities(db=db, user=user, payload=req)
 
         db.commit()
         db.refresh(user)
@@ -198,6 +207,46 @@ def register_generator(req: GeneratorRegisterRequest, db: Session = Depends(get_
         connections=[connection],
         token=token,
         message="Gerador cadastrado com sucesso. Onboarding de inversor iniciado.",
+    )
+
+
+@router.post(
+    "/activate",
+    response_model=GeneratorOnboardingResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Ativar perfil de gerador para usuario autenticado (conta consumidor -> conta hibrida)",
+)
+def activate_generator_profile(
+    req: GeneratorActivateRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing_profile = db.query(GeneratorProfile).filter(GeneratorProfile.user_id == user.user_id).first()
+    if existing_profile:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Usuario ja possui perfil de gerador ativo",
+        )
+
+    try:
+        profile, plant, connection = _create_onboarding_entities(db=db, user=user, payload=req)
+        db.commit()
+        db.refresh(profile)
+        db.refresh(plant)
+        db.refresh(connection)
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Falha de integridade ao ativar perfil de gerador",
+        )
+
+    return _build_response(
+        user=user,
+        profile=profile,
+        plant=plant,
+        connections=[connection],
+        message="Perfil de gerador ativado na conta existente.",
     )
 
 

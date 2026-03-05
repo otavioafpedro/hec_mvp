@@ -57,6 +57,30 @@ class GeneratorRegisterRequest(BaseModel):
         return self
 
 
+class GeneratorActivateRequest(BaseModel):
+    person_type: Literal["PF", "PJ"]
+    document_id: str = Field(..., min_length=11, max_length=32)
+    legal_name: Optional[str] = Field(default=None, max_length=255)
+    trade_name: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    attribute_assignment_accepted: bool = Field(
+        ...,
+        description="Aceite da cessao do atributo ambiental da energia gerada",
+    )
+    plant: GeneratorPlantInput
+    inverter_connection: GeneratorInverterConnectionInput
+
+    @model_validator(mode="after")
+    def validate_business_rules(self):
+        if not self.attribute_assignment_accepted:
+            raise ValueError("attribute_assignment_accepted deve ser true para ativar perfil de gerador")
+        if not self.inverter_connection.consent_accepted:
+            raise ValueError("consent_accepted deve ser true para habilitar integracao de inversor")
+        if self.person_type == "PJ" and not self.legal_name:
+            raise ValueError("legal_name e obrigatorio para pessoa juridica (PJ)")
+        return self
+
+
 class GeneratorConnectionResponse(BaseModel):
     connection_id: UUID
     profile_id: UUID
