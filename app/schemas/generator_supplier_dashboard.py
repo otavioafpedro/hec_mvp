@@ -47,10 +47,21 @@ class SupplierHourlyGenerationItem(BaseModel):
     wind: float = 0.0
 
 
+class SupplierMintCandidateItem(BaseModel):
+    validation_id: UUID
+    plant_id: UUID
+    plant: str
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    energy_kwh: float = 0.0
+    confidence_score: float | None = None
+
+
 class GeneratorSupplierDashboardResponse(BaseModel):
     profile_status: str
     split_percentage: int = 70
     plants: list[SupplierPlantDashboardItem] = Field(default_factory=list)
     recent_hecs: list[SupplierRecentHecItem] = Field(default_factory=list)
     hourly_generation: list[SupplierHourlyGenerationItem] = Field(default_factory=list)
+    mint_candidates: list[SupplierMintCandidateItem] = Field(default_factory=list)
     generated_at: datetime

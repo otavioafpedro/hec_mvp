@@ -29,6 +29,7 @@ from app.schemas.generator_onboarding import (
 from app.schemas.generator_supplier_dashboard import (
     GeneratorSupplierDashboardResponse,
     SupplierHourlyGenerationItem,
+    SupplierMintCandidateItem,
     SupplierPlantDashboardItem,
     SupplierQSVStatus,
     SupplierRecentHecItem,
@@ -472,6 +473,7 @@ def get_supplier_dashboard(
             plants=[],
             recent_hecs=[],
             hourly_generation=[SupplierHourlyGenerationItem(hour=f"{h:02d}:00", solar=0.0, wind=0.0) for h in range(24)],
+            mint_candidates=[],
             generated_at=datetime.utcnow(),
         )
 
@@ -722,11 +724,43 @@ def get_supplier_dashboard(
         for h in range(24)
     ]
 
+    mint_candidate_rows = (
+        db.query(Validation, Plant)
+        .join(Plant, Plant.plant_id == Validation.plant_id)
+        .outerjoin(HECCertificate, HECCertificate.validation_id == Validation.validation_id)
+        .filter(
+            Validation.plant_id.in_(plant_ids),
+            Validation.status == "approved",
+            HECCertificate.hec_id.is_(None),
+        )
+        .order_by(Validation.period_end.desc(), Validation.period_start.desc())
+        .limit(50)
+        .all()
+    )
+
+    mint_candidates_payload = [
+        SupplierMintCandidateItem(
+            validation_id=validation.validation_id,
+            plant_id=plant.plant_id,
+            plant=plant.name,
+            period_start=validation.period_start,
+            period_end=validation.period_end,
+            energy_kwh=round(_as_float(validation.energy_kwh), 4),
+            confidence_score=(
+                round(_as_float(validation.confidence_score), 2)
+                if validation.confidence_score is not None
+                else None
+            ),
+        )
+        for validation, plant in mint_candidate_rows
+    ]
+
     return GeneratorSupplierDashboardResponse(
         profile_status=profile.onboarding_status,
         split_percentage=70,
         plants=plants_payload,
         recent_hecs=recent_payload,
         hourly_generation=hourly_payload,
+        mint_candidates=mint_candidates_payload,
         generated_at=datetime.utcnow(),
     )

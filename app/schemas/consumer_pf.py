@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class ConsumerProfileUpsertRequest(BaseModel):
     person_type: str = Field(..., description="PF or PJ")
-    document_id: str = Field(..., min_length=11, max_length=32)
+    document_id: str | None = Field(default=None, min_length=11, max_length=32)
     display_name: str | None = Field(default=None, max_length=255)
     avatar_seed: str | None = Field(default=None, max_length=20)
     plan_name: str | None = Field(default=None, max_length=60)

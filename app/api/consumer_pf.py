@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID as UUIDType, uuid4
 
@@ -13,6 +13,7 @@ from app.auth import verify_token
 from app.db.session import get_db
 from app.models.models import (
     AchievementCatalog,
+    BurnCertificate,
     ConsumerDashboardSnapshot,
     ConsumerProfile,
     ConsumerRewardLedger,
@@ -214,6 +215,93 @@ def _month_keys_last_n(n: int) -> list[str]:
     return result
 
 
+def _compute_streak_from_burn_days(burn_days: set[date]) -> int:
+    if not burn_days:
+        return 0
+
+    today = datetime.utcnow().date()
+    anchor = today if today in burn_days else today - timedelta(days=1)
+    if anchor not in burn_days:
+        return 0
+
+    streak = 0
+    current = anchor
+    while current in burn_days:
+        streak += 1
+        current -= timedelta(days=1)
+    return streak
+
+
+def _sync_profile_from_burn_history(
+    db: Session,
+    user: User,
+    profile: ConsumerProfile,
+) -> None:
+    burn_rows = (
+        db.query(BurnCertificate.burned_at, BurnCertificate.energy_kwh)
+        .filter(BurnCertificate.user_id == user.user_id)
+        .all()
+    )
+    if not burn_rows:
+        return
+
+    total_mhec = 0
+    burn_days: set[date] = set()
+    monthly_mhec: dict[str, int] = {}
+
+    for burned_at, energy_kwh in burn_rows:
+        amount_mhec = max(0, int(round(float(energy_kwh or 0))))
+        total_mhec += amount_mhec
+        if not burned_at:
+            continue
+        month_key = burned_at.strftime("%Y-%m")
+        monthly_mhec[month_key] = monthly_mhec.get(month_key, 0) + amount_mhec
+        burn_days.add(burned_at.date())
+
+    total_co2 = (Decimal(total_mhec) * Decimal("0.00004")).quantize(Decimal("0.0001"))
+    profile.total_retired_mhec = total_mhec
+    profile.total_co2_avoided_tons = total_co2
+    profile.total_trees_equivalent = int(float(total_co2) * 6.6)
+    profile.current_streak_days = _compute_streak_from_burn_days(burn_days)
+    profile.updated_at = datetime.utcnow()
+
+    existing_snapshots = (
+        db.query(ConsumerDashboardSnapshot)
+        .filter(ConsumerDashboardSnapshot.user_id == user.user_id)
+        .all()
+    )
+    by_month = {row.reference_month: row for row in existing_snapshots}
+    now = datetime.utcnow()
+
+    for month_key, retired_mhec in monthly_mhec.items():
+        snapshot = by_month.get(month_key)
+        month_co2 = (Decimal(retired_mhec) * Decimal("0.00004")).quantize(Decimal("0.0001"))
+        if not snapshot:
+            db.add(
+                ConsumerDashboardSnapshot(
+                    snapshot_id=uuid4(),
+                    user_id=user.user_id,
+                    reference_month=month_key,
+                    consumed_kwh=Decimal(retired_mhec),
+                    retired_mhec=retired_mhec,
+                    retirement_pct=Decimal("100.00"),
+                    co2_avoided_tons=month_co2,
+                    created_at=now,
+                )
+            )
+            continue
+
+        snapshot.retired_mhec = retired_mhec
+        consumed_kwh = float(snapshot.consumed_kwh or 0)
+        if consumed_kwh <= 0:
+            snapshot.consumed_kwh = Decimal(retired_mhec)
+            consumed_kwh = float(retired_mhec)
+
+        retirement_pct = 0.0 if consumed_kwh <= 0 else min(100.0, (retired_mhec / consumed_kwh) * 100.0)
+        snapshot.retirement_pct = Decimal(str(round(retirement_pct, 2)))
+        snapshot.co2_avoided_tons = month_co2
+
+
 def _ensure_consumer_role(db: Session, user: User) -> None:
     existing = (
         db.query(UserRoleBinding)
@@ -302,6 +390,33 @@ def _ensure_dnft_seed(db: Session) -> None:
         )
 
 
+def _infer_default_person_type(db: Session, user: User) -> str:
+    generator_profile = (
+        db.query(GeneratorProfile.person_type)
+        .filter(GeneratorProfile.user_id == user.user_id)
+        .first()
+    )
+    if generator_profile and generator_profile[0] in {"PF", "PJ"}:
+        return generator_profile[0]
+
+    role_values = {
+        str(value or "").strip().lower()
+        for (value,) in (
+            db.query(UserRoleBinding.role_code)
+            .filter(UserRoleBinding.user_id == user.user_id)
+            .all()
+        )
+    }
+    role_values.add(str(user.role or "").strip().lower())
+    role_haystack = " ".join(sorted(role_values))
+
+    pj_hints = ("pj", "institutional", "corporate", "company")
+    if any(hint in role_haystack for hint in pj_hints):
+        return "PJ"
+
+    return "PF"
+
+
 def _get_or_create_profile(db: Session, user: User) -> ConsumerProfile:
     profile = (
         db.query(ConsumerProfile)
@@ -314,7 +429,7 @@ def _get_or_create_profile(db: Session, user: User) -> ConsumerProfile:
     profile = ConsumerProfile(
         profile_id=uuid4(),
         user_id=user.user_id,
-        person_type="PF",
+        person_type=_infer_default_person_type(db, user),
         display_name=user.name,
         avatar_seed=_avatar_from_name(user.name),
         plan_name="Ouro Verde",
@@ -751,6 +866,7 @@ def _assemble_dashboard(db: Session, user: User) -> ConsumerPFDashboardResponse:
     _ensure_dnft_seed(db)
     _ensure_consumer_role(db, user)
     profile = _get_or_create_profile(db, user)
+    _sync_profile_from_burn_history(db, user, profile)
 
     tiers = db.query(DNFTDefinition).order_by(DNFTDefinition.min_mhec_required.asc()).all()
     _sync_dnft_state(db, user, profile, tiers)
@@ -793,6 +909,7 @@ def get_dnft_summary(
 ):
     _ensure_dnft_seed(db)
     profile = _get_or_create_profile(db, user)
+    _sync_profile_from_burn_history(db, user, profile)
     tiers = db.query(DNFTDefinition).order_by(DNFTDefinition.min_mhec_required.asc()).all()
     _sync_dnft_state(db, user, profile, tiers)
     db.commit()
@@ -810,6 +927,7 @@ def get_achievements(
 ):
     _ensure_catalog_seed(db)
     profile = _get_or_create_profile(db, user)
+    _sync_profile_from_burn_history(db, user, profile)
     snapshots = _load_monthly_footprint(db, user)
     achievements, _, _ = _sync_achievements(db, user, profile, snapshots)
     db.commit()
