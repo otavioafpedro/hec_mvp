@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 import re
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 
 from app.auth import register_user, verify_token
@@ -10,8 +12,12 @@ from app.db.session import get_db
 from app.models.models import (
     GeneratorInverterConnection,
     GeneratorProfile,
+    HECCertificate,
+    HECLot,
     Plant,
+    Transaction,
     User,
+    Validation,
 )
 from app.schemas.generator_onboarding import (
     AddGeneratorConnectionRequest,
@@ -19,6 +25,13 @@ from app.schemas.generator_onboarding import (
     GeneratorConnectionResponse,
     GeneratorOnboardingResponse,
     GeneratorRegisterRequest,
+)
+from app.schemas.generator_supplier_dashboard import (
+    GeneratorSupplierDashboardResponse,
+    SupplierHourlyGenerationItem,
+    SupplierPlantDashboardItem,
+    SupplierQSVStatus,
+    SupplierRecentHecItem,
 )
 
 router = APIRouter(prefix="/generator-onboarding", tags=["Generator Onboarding"])
@@ -74,6 +87,71 @@ def _build_response(
         connections=[_to_connection_response(conn) for conn in connections],
         message=message,
     )
+
+
+def _as_float(value: float | int | Decimal | None) -> float:
+    if value is None:
+        return 0.0
+    return float(value)
+
+
+def _kwh_to_mwh(value: float | int | Decimal | None) -> float:
+    return _as_float(value) / 1000.0
+
+
+def _format_capacity(capacity_kw: float | int | Decimal | None) -> str:
+    kw = _as_float(capacity_kw)
+    if kw >= 1000:
+        return f"{kw / 1000:.1f} MW"
+    return f"{kw:.0f} kW"
+
+
+def _infer_plant_type(name: str | None) -> str:
+    normalized = (name or "").strip().lower()
+    if any(token in normalized for token in ("eolica", "eólica", "wind")):
+        return "Eolica"
+    if any(token in normalized for token in ("solar", "fotovoltaica", "fotovoltaico", "pv")):
+        return "Solar"
+    return "Solar"
+
+
+def _normalize_dashboard_status(status_value: str | None) -> str:
+    normalized = (status_value or "").strip().lower()
+    if normalized in {"active", "online"}:
+        return "online"
+    return "maintenance"
+
+
+def _format_location(lat: float | int | Decimal | None, lng: float | int | Decimal | None) -> str:
+    lat_value = _as_float(lat)
+    lng_value = _as_float(lng)
+    return f"{lat_value:.4f}, {lng_value:.4f}"
+
+
+def _format_brl(value: float | int | Decimal | None) -> str:
+    amount = _as_float(value)
+    formatted = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {formatted}"
+
+
+def _format_last_sync(sync_dt: datetime | None) -> str:
+    if not sync_dt:
+        return "-"
+    delta = datetime.utcnow() - sync_dt
+    if delta.total_seconds() < 60:
+        return f"ha {int(delta.total_seconds())}s"
+    if delta.total_seconds() < 3600:
+        return f"ha {int(delta.total_seconds() // 60)}m"
+    return f"ha {int(delta.total_seconds() // 3600)}h"
+
+
+def _tier_from_confidence(score: float | int | Decimal | None) -> str:
+    value = _as_float(score)
+    if value >= 95:
+        return "Tier 1"
+    if value >= 85:
+        return "Tier 2"
+    return "Tier 3"
 
 
 def _create_onboarding_entities(
@@ -363,3 +441,292 @@ def add_generator_connection(
         db.commit()
 
     return _to_connection_response(connection)
+
+
+@router.get(
+    "/supplier-dashboard",
+    response_model=GeneratorSupplierDashboardResponse,
+    summary="Dashboard de fornecedor do gerador autenticado",
+)
+def get_supplier_dashboard(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.query(GeneratorProfile).filter(GeneratorProfile.user_id == user.user_id).first()
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Perfil de gerador nao encontrado para este usuario",
+        )
+
+    plants = (
+        db.query(Plant)
+        .filter(Plant.owner_user_id == user.user_id)
+        .order_by(Plant.created_at.asc())
+        .all()
+    )
+    if not plants:
+        return GeneratorSupplierDashboardResponse(
+            profile_status=profile.onboarding_status,
+            split_percentage=70,
+            plants=[],
+            recent_hecs=[],
+            hourly_generation=[SupplierHourlyGenerationItem(hour=f"{h:02d}:00", solar=0.0, wind=0.0) for h in range(24)],
+            generated_at=datetime.utcnow(),
+        )
+
+    plant_ids = [p.plant_id for p in plants]
+    now = datetime.utcnow()
+    day_start = datetime(now.year, now.month, now.day)
+    day_end = day_start + timedelta(days=1)
+    month_start = datetime(now.year, now.month, 1)
+
+    generation_rows = (
+        db.query(
+            Validation.plant_id.label("plant_id"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Validation.period_end >= day_start,
+                            Validation.period_end < day_end,
+                            Validation.status != "rejected",
+                        ),
+                        Validation.energy_kwh,
+                    ),
+                    else_=0,
+                )
+            ).label("gen_today_kwh"),
+            func.sum(
+                case(
+                    (
+                        and_(
+                            Validation.period_end >= month_start,
+                            Validation.status != "rejected",
+                        ),
+                        Validation.energy_kwh,
+                    ),
+                    else_=0,
+                )
+            ).label("gen_month_kwh"),
+            func.count(Validation.validation_id).label("validation_count"),
+            func.sum(case((Validation.status == "approved", 1), else_=0)).label("approved_count"),
+        )
+        .filter(Validation.plant_id.in_(plant_ids))
+        .group_by(Validation.plant_id)
+        .all()
+    )
+    generation_by_plant = {row.plant_id: row for row in generation_rows}
+
+    hec_rows = (
+        db.query(
+            Validation.plant_id.label("plant_id"),
+            func.count(HECCertificate.hec_id).label("hecs_emitted"),
+            func.sum(
+                case(
+                    (HECCertificate.status.in_(("registered", "minted", "listed")), 1),
+                    else_=0,
+                )
+            ).label("hecs_available"),
+            func.sum(
+                case(
+                    (
+                        HECCertificate.status == "sold",
+                        HECCertificate.energy_kwh * func.coalesce(HECLot.price_per_kwh, 0),
+                    ),
+                    else_=0,
+                )
+            ).label("gross_revenue_brl"),
+        )
+        .join(Validation, Validation.validation_id == HECCertificate.validation_id)
+        .outerjoin(HECLot, HECLot.lot_id == HECCertificate.lot_id)
+        .filter(Validation.plant_id.in_(plant_ids))
+        .group_by(Validation.plant_id)
+        .all()
+    )
+    hec_by_plant = {row.plant_id: row for row in hec_rows}
+
+    latest_validation_subquery = (
+        db.query(
+            Validation.plant_id.label("plant_id"),
+            func.max(Validation.period_end).label("latest_period_end"),
+        )
+        .filter(Validation.plant_id.in_(plant_ids))
+        .group_by(Validation.plant_id)
+        .subquery()
+    )
+
+    latest_validations = (
+        db.query(Validation)
+        .join(
+            latest_validation_subquery,
+            and_(
+                Validation.plant_id == latest_validation_subquery.c.plant_id,
+                Validation.period_end == latest_validation_subquery.c.latest_period_end,
+            ),
+        )
+        .all()
+    )
+    latest_validation_by_plant: dict = {}
+    for item in latest_validations:
+        current = latest_validation_by_plant.get(item.plant_id)
+        if current is None or (item.period_end and current.period_end and item.period_end > current.period_end):
+            latest_validation_by_plant[item.plant_id] = item
+
+    sync_rows = (
+        db.query(
+            GeneratorInverterConnection.plant_id.label("plant_id"),
+            func.max(GeneratorInverterConnection.last_sync_at).label("last_sync_at"),
+        )
+        .filter(GeneratorInverterConnection.plant_id.in_(plant_ids))
+        .group_by(GeneratorInverterConnection.plant_id)
+        .all()
+    )
+    sync_by_plant = {row.plant_id: row.last_sync_at for row in sync_rows}
+
+    plants_payload: list[SupplierPlantDashboardItem] = []
+    for plant in plants:
+        generation = generation_by_plant.get(plant.plant_id)
+        hec_stats = hec_by_plant.get(plant.plant_id)
+        latest = latest_validation_by_plant.get(plant.plant_id)
+
+        validation_count = int(getattr(generation, "validation_count", 0) or 0)
+        approved_count = int(getattr(generation, "approved_count", 0) or 0)
+        efficiency = round((approved_count / validation_count) * 100.0, 1) if validation_count > 0 else 0.0
+
+        qsv = SupplierQSVStatus(
+            ccee=bool(latest.status == "approved") if latest else True,
+            mqtt=bool(latest.ntp_pass) if latest and latest.ntp_pass is not None else True,
+            meter=bool(latest.physics_pass) if latest and latest.physics_pass is not None else True,
+            sat=bool(latest.satellite_pass) if latest and latest.satellite_pass is not None else True,
+        )
+        last_sync = sync_by_plant.get(plant.plant_id) or (latest.period_end if latest else None) or plant.updated_at
+
+        plants_payload.append(
+            SupplierPlantDashboardItem(
+                id=plant.plant_id,
+                name=plant.name,
+                type=_infer_plant_type(plant.name),
+                capacity=_format_capacity(plant.capacity_kw),
+                location=_format_location(plant.lat, plant.lng),
+                status=_normalize_dashboard_status(plant.status),
+                genToday=round(_kwh_to_mwh(getattr(generation, "gen_today_kwh", 0)), 2),
+                genMonth=round(_kwh_to_mwh(getattr(generation, "gen_month_kwh", 0)), 2),
+                efficiency=efficiency,
+                hecsEmitted=int(getattr(hec_stats, "hecs_emitted", 0) or 0),
+                hecsAvailable=int(getattr(hec_stats, "hecs_available", 0) or 0),
+                revenue=round(_as_float(getattr(hec_stats, "gross_revenue_brl", 0)) * 0.7, 2),
+                qsv=qsv,
+                lastSync=_format_last_sync(last_sync),
+            )
+        )
+
+    recent_rows = (
+        db.query(HECCertificate, Validation, Plant, HECLot)
+        .join(Validation, Validation.validation_id == HECCertificate.validation_id)
+        .join(Plant, Plant.plant_id == Validation.plant_id)
+        .outerjoin(HECLot, HECLot.lot_id == HECCertificate.lot_id)
+        .filter(Validation.plant_id.in_(plant_ids))
+        .order_by(HECCertificate.minted_at.desc())
+        .limit(30)
+        .all()
+    )
+
+    lot_ids = [lot.lot_id for _, _, _, lot in recent_rows if lot and lot.lot_id]
+    buyer_by_lot = {}
+    if lot_ids:
+        latest_tx_subquery = (
+            db.query(
+                Transaction.lot_id.label("lot_id"),
+                func.max(Transaction.created_at).label("latest_tx_at"),
+            )
+            .filter(Transaction.lot_id.in_(lot_ids))
+            .group_by(Transaction.lot_id)
+            .subquery()
+        )
+        latest_buyers = (
+            db.query(Transaction.lot_id, User.name)
+            .join(
+                latest_tx_subquery,
+                and_(
+                    Transaction.lot_id == latest_tx_subquery.c.lot_id,
+                    Transaction.created_at == latest_tx_subquery.c.latest_tx_at,
+                ),
+            )
+            .join(User, User.user_id == Transaction.buyer_id)
+            .all()
+        )
+        buyer_by_lot = {row.lot_id: row.name for row in latest_buyers}
+
+    recent_payload: list[SupplierRecentHecItem] = []
+    for hec, validation, plant, lot in recent_rows:
+        total_price_brl = 0.0
+        if lot and lot.price_per_kwh:
+            total_price_brl = _as_float(hec.energy_kwh) * _as_float(lot.price_per_kwh)
+        status_value = "minted" if hec.status in ("sold", "retired", "minted", "registered") else "available"
+        buyer_name = "-"
+        if hec.lot_id in buyer_by_lot:
+            buyer_name = buyer_by_lot[hec.lot_id]
+        hour_label = "-"
+        if validation and validation.period_start and validation.period_end:
+            hour_label = f"{validation.period_start.strftime('%H:%M')}-{validation.period_end.strftime('%H:%M')}"
+        merkle = "-"
+        if hec.hash_sha256:
+            merkle = f"0x{hec.hash_sha256[:4]}...{hec.hash_sha256[-4:]}"
+
+        recent_payload.append(
+            SupplierRecentHecItem(
+                id=f"HEC-{str(hec.hec_id)[:8].upper()}",
+                plant=plant.name,
+                hour=hour_label,
+                mwh=round(_kwh_to_mwh(hec.energy_kwh), 3),
+                price=_format_brl(total_price_brl),
+                status=status_value,
+                merkle=merkle,
+                buyer=buyer_name,
+                tier=_tier_from_confidence(validation.confidence_score if validation else None),
+            )
+        )
+
+    hourly_bucket = {h: {"solar": 0.0, "wind": 0.0} for h in range(24)}
+    hourly_rows = (
+        db.query(Validation.period_start, Validation.energy_kwh, Plant.name)
+        .join(Plant, Plant.plant_id == Validation.plant_id)
+        .filter(
+            Validation.plant_id.in_(plant_ids),
+            Validation.period_start >= day_start,
+            Validation.period_start < day_end,
+            Validation.status != "rejected",
+        )
+        .all()
+    )
+
+    for period_start, energy_kwh, plant_name in hourly_rows:
+        if not period_start:
+            continue
+        idx = int(period_start.hour)
+        if idx < 0 or idx > 23:
+            continue
+        mwh = _kwh_to_mwh(energy_kwh)
+        if _infer_plant_type(plant_name) == "Eolica":
+            hourly_bucket[idx]["wind"] += mwh
+        else:
+            hourly_bucket[idx]["solar"] += mwh
+
+    hourly_payload = [
+        SupplierHourlyGenerationItem(
+            hour=f"{h:02d}:00",
+            solar=round(hourly_bucket[h]["solar"], 3),
+            wind=round(hourly_bucket[h]["wind"], 3),
+        )
+        for h in range(24)
+    ]
+
+    return GeneratorSupplierDashboardResponse(
+        profile_status=profile.onboarding_status,
+        split_percentage=70,
+        plants=plants_payload,
+        recent_hecs=recent_payload,
+        hourly_generation=hourly_payload,
+        generated_at=datetime.utcnow(),
+    )
