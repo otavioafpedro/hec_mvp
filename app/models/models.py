@@ -269,6 +269,43 @@ class User(Base):
         cascade="all, delete-orphan",
     )
     plants = relationship("Plant", back_populates="owner")
+    consumer_profile = relationship(
+        "ConsumerProfile",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    role_bindings = relationship(
+        "UserRoleBinding",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    user_achievements = relationship(
+        "UserAchievement",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    dnft_state = relationship(
+        "UserDNFTState",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+    dnft_events = relationship(
+        "UserDNFTEvent",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    reward_ledger_entries = relationship(
+        "ConsumerRewardLedger",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    dashboard_snapshots = relationship(
+        "ConsumerDashboardSnapshot",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -450,4 +487,207 @@ class BurnCertificate(Base):
 
     # Relationships
     user = relationship("User", back_populates="burns")
+
+
+# ---------------------------------------------------------------------------
+# CONSUMER_PROFILES - PF/PJ consumer identity and dashboard counters
+# ---------------------------------------------------------------------------
+class ConsumerProfile(Base):
+    __tablename__ = "consumer_profiles"
+
+    profile_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    person_type = Column(String(2), nullable=False, default="PF", comment="PF | PJ")
+    document_id = Column(String(32), unique=True, nullable=True, comment="CPF/CNPJ normalized")
+    display_name = Column(String(255), nullable=True)
+    avatar_seed = Column(String(20), nullable=False, default="SOA")
+    plan_name = Column(String(60), nullable=False, default="Verde")
+    premmia_id = Column(String(50), unique=True, nullable=True)
+    premmia_points = Column(Integer, nullable=False, default=0)
+    current_streak_days = Column(Integer, nullable=False, default=0)
+    total_retired_mhec = Column(Integer, nullable=False, default=0)
+    total_co2_avoided_tons = Column(Numeric(12, 4), nullable=False, default=0)
+    total_trees_equivalent = Column(Integer, nullable=False, default=0)
+    total_referrals = Column(Integer, nullable=False, default=0)
+    joined_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="consumer_profile")
+
+
+# ---------------------------------------------------------------------------
+# USER_ROLE_BINDINGS - Multi-role support (consumer + generator)
+# ---------------------------------------------------------------------------
+class UserRoleBinding(Base):
+    __tablename__ = "user_role_bindings"
+
+    binding_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    role_code = Column(
+        String(30),
+        nullable=False,
+        comment="consumer | generator | institutional | admin",
+    )
+    is_primary = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "role_code", name="uq_user_role_binding"),
+    )
+
+    user = relationship("User", back_populates="role_bindings")
+
+
+# ---------------------------------------------------------------------------
+# ACHIEVEMENT_CATALOG / USER_ACHIEVEMENTS - gamification
+# ---------------------------------------------------------------------------
+class AchievementCatalog(Base):
+    __tablename__ = "achievement_catalog"
+
+    achievement_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    code = Column(String(60), unique=True, nullable=False, index=True)
+    name = Column(String(120), nullable=False)
+    description = Column(Text, nullable=False)
+    icon = Column(String(16), nullable=False, default="*")
+    metric_key = Column(String(50), nullable=False, default="total_retired_mhec")
+    target_value = Column(Integer, nullable=False, default=1)
+    points_reward = Column(Integer, nullable=False, default=0)
+    is_active = Column(Boolean, nullable=False, default=True)
+    sort_order = Column(Integer, nullable=False, default=100)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user_achievements = relationship(
+        "UserAchievement",
+        back_populates="achievement",
+        cascade="all, delete-orphan",
+    )
+
+
+class UserAchievement(Base):
+    __tablename__ = "user_achievements"
+
+    user_achievement_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    achievement_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("achievement_catalog.achievement_id"),
+        nullable=False,
+        index=True,
+    )
+    progress_value = Column(Integer, nullable=False, default=0)
+    is_unlocked = Column(Boolean, nullable=False, default=False)
+    unlocked_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "achievement_id", name="uq_user_achievement"),
+    )
+
+    user = relationship("User", back_populates="user_achievements")
+    achievement = relationship("AchievementCatalog", back_populates="user_achievements")
+
+
+# ---------------------------------------------------------------------------
+# DNFT_DEFINITIONS / USER_DNFT_STATES / USER_DNFT_EVENTS
+# ---------------------------------------------------------------------------
+class DNFTDefinition(Base):
+    __tablename__ = "dnft_definitions"
+
+    dnft_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    tier_level = Column(Integer, nullable=False, unique=True)
+    tier_name = Column(String(120), nullable=False)
+    min_mhec_required = Column(Integer, nullable=False)
+    icon = Column(String(16), nullable=False, default="*")
+    benefits_json = Column(JSONB, nullable=True, comment="List of tier benefits")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UserDNFTState(Base):
+    __tablename__ = "user_dnft_states"
+
+    state_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.user_id"),
+        unique=True,
+        nullable=False,
+        index=True,
+    )
+    current_tier_level = Column(Integer, nullable=False, default=1)
+    current_xp_mhec = Column(Integer, nullable=False, default=0)
+    next_tier_level = Column(Integer, nullable=False, default=1)
+    next_tier_target_mhec = Column(Integer, nullable=False, default=0)
+    progress_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User", back_populates="dnft_state")
+
+
+class UserDNFTEvent(Base):
+    __tablename__ = "user_dnft_events"
+
+    event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    from_tier_level = Column(Integer, nullable=True)
+    to_tier_level = Column(Integer, nullable=False)
+    event_type = Column(String(30), nullable=False, default="upgrade")
+    event_payload = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    user = relationship("User", back_populates="dnft_events")
+
+
+# ---------------------------------------------------------------------------
+# CONSUMER_REWARD_LEDGER - points and mHEC reward accounting
+# ---------------------------------------------------------------------------
+class ConsumerRewardLedger(Base):
+    __tablename__ = "consumer_reward_ledger"
+
+    ledger_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    source_type = Column(
+        String(30),
+        nullable=False,
+        default="manual",
+        comment="burn | achievement | conversion | manual",
+    )
+    source_ref = Column(String(100), nullable=True)
+    points_delta = Column(Integer, nullable=False, default=0)
+    mhec_delta = Column(Integer, nullable=False, default=0)
+    balance_after = Column(Integer, nullable=True)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    user = relationship("User", back_populates="reward_ledger_entries")
+
+
+# ---------------------------------------------------------------------------
+# CONSUMER_DASHBOARD_SNAPSHOTS - monthly snapshots for PF charts
+# ---------------------------------------------------------------------------
+class ConsumerDashboardSnapshot(Base):
+    __tablename__ = "consumer_dashboard_snapshots"
+
+    snapshot_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    reference_month = Column(String(7), nullable=False, comment="YYYY-MM")
+    consumed_kwh = Column(Numeric(12, 3), nullable=False, default=0)
+    retired_mhec = Column(Integer, nullable=False, default=0)
+    retirement_pct = Column(Numeric(5, 2), nullable=False, default=0)
+    co2_avoided_tons = Column(Numeric(10, 4), nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "reference_month", name="uq_consumer_snapshot_user_month"),
+    )
+
+    user = relationship("User", back_populates="dashboard_snapshots")
 

@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.models import User, BurnCertificate
 from app.schemas.burn import (
-    BurnRequest, BurnCertificateResponse, BurnListResponse,
+    BurnRequest, BurnCertificateResponse, BurnListResponse, BurnVerifyResponse,
 )
 from app.burn_service import execute_burn, generate_burn_certificate_pdf
 from app.auth import verify_token
@@ -56,6 +56,55 @@ def get_current_user(
             detail="Usuário não encontrado",
         )
     return user
+
+
+# ---------------------------------------------------------------------------
+# GET /burn/verify/{burn_id} — public verification for sustainability reports
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/burn/verify/{burn_id}",
+    response_model=BurnVerifyResponse,
+    summary="Verificar claim/burn por ID (público)",
+)
+def verify_burn_public(
+    burn_id: UUID,
+    db: Session = Depends(get_db),
+):
+    burn = db.query(BurnCertificate).filter(
+        BurnCertificate.burn_id == burn_id,
+    ).first()
+
+    if not burn:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Burn {burn_id} não encontrado",
+        )
+
+    backing_complete = burn.registry_tx_hash is not None
+    return BurnVerifyResponse(
+        burn_id=burn.burn_id,
+        quantity=burn.quantity,
+        energy_kwh=float(burn.energy_kwh),
+        certificate_hash=burn.hash_sha256,
+        ipfs_json_cid=burn.ipfs_json_cid,
+        ipfs_pdf_cid=burn.ipfs_pdf_cid,
+        ipfs_provider=burn.ipfs_provider,
+        registry_tx_hash=burn.registry_tx_hash,
+        registry_block=burn.registry_block,
+        contract_address=burn.contract_address,
+        chain=burn.chain,
+        reason=burn.reason or "voluntary",
+        status=burn.status,
+        burned_at=burn.burned_at.isoformat() + "Z",
+        backing_complete=backing_complete,
+        message=(
+            f"Claim/Burn verificado — {burn.quantity} HECs, "
+            f"{float(burn.energy_kwh):.4f} kWh, "
+            f"status: {burn.status.upper()}"
+            + (" — backing completo" if backing_complete else "")
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -49,3 +49,22 @@ class BurnListResponse(BaseModel):
     status: str
     registry_tx_hash: Optional[str] = None
     burned_at: str
+
+
+class BurnVerifyResponse(BaseModel):
+    burn_id: UUID
+    quantity: int
+    energy_kwh: float
+    certificate_hash: str
+    ipfs_json_cid: Optional[str] = None
+    ipfs_pdf_cid: Optional[str] = None
+    ipfs_provider: Optional[str] = None
+    registry_tx_hash: Optional[str] = None
+    registry_block: Optional[int] = None
+    contract_address: Optional[str] = None
+    chain: Optional[str] = None
+    reason: str = "voluntary"
+    status: str = "burned"
+    burned_at: str
+    backing_complete: bool = False
+    message: str = ""

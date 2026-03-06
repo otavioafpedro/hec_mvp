@@ -8,7 +8,9 @@ from datetime import datetime
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 
 from app.db.session import Base, get_db
 from app.main import app
@@ -21,6 +23,16 @@ engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 SEED_PLANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
+@compiles(JSONB, "sqlite")
+def _sqlite_jsonb(_type, _compiler, **_kwargs):
+    return "JSON"
+
+
+@compiles(PGUUID, "sqlite")
+def _sqlite_uuid(_type, _compiler, **_kwargs):
+    return "CHAR(36)"
 
 
 @pytest.fixture(scope="function")
