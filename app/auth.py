@@ -164,3 +164,66 @@ def login_user(
 
     token = create_token(str(user.user_id), email)
     return user, token
+
+
+def login_or_create_social_user(
+    db: Session,
+    email: str,
+    name: str,
+    role: str = "buyer",
+) -> tuple:
+    """
+    Login social:
+      - Se usuario existe, reutiliza conta
+      - Se nao existe, cria usuario com senha aleatoria
+      - Garante wallet para ambos os casos
+
+    Returns:
+        (user, wallet, token, created)
+    """
+    normalized_email = (email or "").strip().lower()
+    if not normalized_email:
+        raise ValueError("Email obrigatorio para login social")
+
+    display_name = (name or "").strip()
+    if not display_name:
+        local_part = normalized_email.split("@", 1)[0]
+        display_name = local_part or "Usuario"
+
+    created = False
+    user = db.query(User).filter(User.email == normalized_email).first()
+
+    if not user:
+        created = True
+        random_password = uuid.uuid4().hex
+        user = User(
+            user_id=uuid.uuid4(),
+            email=normalized_email,
+            name=display_name,
+            password_hash=hash_password(random_password),
+            role=role,
+            is_active=True,
+        )
+        db.add(user)
+        db.flush()
+    else:
+        if display_name and not user.name:
+            user.name = display_name
+        if not user.is_active:
+            user.is_active = True
+        db.flush()
+
+    wallet = db.query(Wallet).filter(Wallet.user_id == user.user_id).first()
+    if not wallet:
+        wallet = Wallet(
+            wallet_id=uuid.uuid4(),
+            user_id=user.user_id,
+            balance_brl=INITIAL_BALANCE_BRL,
+            hec_balance=0,
+            energy_balance_kwh=Decimal("0"),
+        )
+        db.add(wallet)
+        db.flush()
+
+    token = create_token(str(user.user_id), user.email)
+    return user, wallet, token, created

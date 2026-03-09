@@ -28,6 +28,18 @@ class Settings(BaseSettings):
     ELECTRICITY_MAPS_KEY: str = ""
     ELECTRICITY_MAPS_URL: str = "https://api.electricitymap.org/v3"
 
+    # Social OAuth (Google / LinkedIn)
+    OAUTH_STATE_SECRET: str = "hec-oauth-state-secret-change-in-production"
+    OAUTH_STATE_TTL_SECONDS: int = 600
+    OAUTH_DEFAULT_FRONTEND_REDIRECT_URI: str = "http://localhost:3000/auth/social/callback"
+    OAUTH_ALLOWED_REDIRECT_HOSTS: str = ""
+    GOOGLE_CLIENT_ID: str = ""
+    GOOGLE_CLIENT_SECRET: str = ""
+    GOOGLE_REDIRECT_URI: str = ""
+    LINKEDIN_CLIENT_ID: str = ""
+    LINKEDIN_CLIENT_SECRET: str = ""
+    LINKEDIN_REDIRECT_URI: str = ""
+
     # Legacy PostgreSQL (validation-engine schema)
     POSTGRES_USER: str = "solarone"
     POSTGRES_PASSWORD: str = "solarone_secret"
