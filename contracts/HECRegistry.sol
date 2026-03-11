@@ -18,7 +18,7 @@ pragma solidity ^0.8.20;
  *   2. Backend gera certificado HEC (JSON + PDF + SHA-256)
  *   3. Backend upload IPFS (JSON + PDF → CIDs)
  *   4. Backend chama register(hash, ipfsCID) neste contrato
- *   5. Contrato emite CertificateRegistered event
+ *   5. Contrato emite Certificate Registered event
  *   6. Qualquer pessoa pode chamar verify(hash) para checar
  */
 contract HECRegistry {
