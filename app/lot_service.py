@@ -1,22 +1,8 @@
 """
-Serviço de Lotes HEC — Agrupamento de certificados para comercialização
-
-Regras de negócio:
-  1. Só HECs com backing completo podem entrar em lotes:
-     - validation.status == "approved"
-     - ipfs_json_cid IS NOT NULL
-     - registry_tx_hash IS NOT NULL
-  2. Cada HEC só pode pertencer a um lote (lot_id unique per HEC)
-  3. Lote calcula total_quantity, available_quantity, total_energy_kwh
-  4. Status do HEC muda para "listed" ao entrar em lote
-
-Fluxo:
-  1. POST /lots/create com lista de hec_ids + nome
-  2. Valida cada HEC: backing completo? Já em outro lote?
-  3. Cria hec_lot com totais
-  4. Atribui lot_id a cada HEC
-  5. Retorna lote com detalhes
+Lot service for platform custody inventory issuance.
 """
+import hashlib
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,16 +11,13 @@ from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
-from app.models.models import HECCertificate, HECLot, Validation
+from app.blockchain import UNIT_SCALE, issue_inventory_batch_on_chain
+from app.ipfs_service import upload_json_document_to_ipfs
+from app.models.models import HECCertificate, HECLot
 
-
-# ---------------------------------------------------------------------------
-# Resultado
-# ---------------------------------------------------------------------------
 
 @dataclass
 class LotCreationResult:
-    """Resultado da criação de um lote."""
     lot_id: uuid.UUID
     name: str
     description: Optional[str]
@@ -43,61 +26,107 @@ class LotCreationResult:
     total_energy_kwh: float
     certificate_count: int
     status: str
+    custody_mode: str
+    transferability_policy: str
+    inventory_status: str
+    batch_hash: str
+    manifest_cid: Optional[str]
+    onchain_batch_token_id: Optional[int]
+    onchain_issued_tx_hash: Optional[str]
     hec_ids: List[str]
     created_at: datetime
 
 
-# ---------------------------------------------------------------------------
-# Validação de backing completo
-# ---------------------------------------------------------------------------
-
 def validate_hec_backing(hec: HECCertificate) -> Optional[str]:
-    """
-    Valida se um HEC tem backing completo para entrar em lote.
-
-    Retorna None se OK, ou string com motivo da rejeição.
-
-    Critérios (TODOS obrigatórios):
-      1. validation.status == "approved" (via HEC status == "registered")
-      2. ipfs_json_cid IS NOT NULL
-      3. registry_tx_hash IS NOT NULL
-    """
-    # Critério 1: Status registered (implica validation approved)
     if hec.status not in ("registered", "minted"):
         return (
-            f"HEC {hec.hec_id} — status={hec.status}, "
-            f"requerido: registered (backing completo)"
+            f"HEC {hec.hec_id} - status={hec.status}, "
+            f"required: registered or minted"
         )
-
-    # Critério 2: IPFS CID
     if not hec.ipfs_json_cid:
-        return (
-            f"HEC {hec.hec_id} — ipfs_json_cid ausente, "
-            f"upload IPFS necessário"
-        )
-
-    # Critério 3: On-chain registry
+        return f"HEC {hec.hec_id} - missing ipfs_json_cid"
     if not hec.registry_tx_hash:
-        return (
-            f"HEC {hec.hec_id} — registry_tx_hash ausente, "
-            f"registro on-chain necessário"
-        )
-
-    return None  # All checks passed
-
-
-def validate_hec_not_in_lot(hec: HECCertificate) -> Optional[str]:
-    """Valida se HEC não está já em outro lote."""
-    if hec.lot_id is not None:
-        return (
-            f"HEC {hec.hec_id} já pertence ao lote {hec.lot_id}"
-        )
+        return f"HEC {hec.hec_id} - missing registry_tx_hash"
     return None
 
 
-# ---------------------------------------------------------------------------
-# Create lot
-# ---------------------------------------------------------------------------
+def validate_hec_not_in_lot(hec: HECCertificate) -> Optional[str]:
+    if hec.lot_id is not None:
+        return f"HEC {hec.hec_id} already belongs to lot {hec.lot_id}"
+    return None
+
+
+def _canonical_json_hash(payload: dict) -> str:
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _derive_period_bounds(hecs: List[HECCertificate]) -> tuple[int, int]:
+    starts = []
+    ends = []
+    for hec in hecs:
+        validation = getattr(hec, "validation", None)
+        if validation and validation.period_start:
+            starts.append(int(validation.period_start.replace(tzinfo=timezone.utc).timestamp()))
+        if validation and validation.period_end:
+            ends.append(int(validation.period_end.replace(tzinfo=timezone.utc).timestamp()))
+
+    if not starts or not ends:
+        now = int(datetime.now(timezone.utc).timestamp())
+        return now, now
+
+    return min(starts), max(ends)
+
+
+def build_lot_manifest(
+    lot_id: uuid.UUID,
+    name: str,
+    description: Optional[str],
+    hecs: List[HECCertificate],
+    price_per_kwh: Optional[float],
+    period_start: int,
+    period_end: int,
+) -> dict:
+    total_energy = round(sum(float(hec.energy_kwh) for hec in hecs), 4)
+    return {
+        "inventory_batch": {
+            "lot_id": str(lot_id),
+            "version": "2.0",
+            "standard": "HEC-INVENTORY-CUSTODY-BR-2026",
+            "custody_mode": "platform_custody",
+            "transferability_policy": "non_transferable",
+        },
+        "lot": {
+            "name": name,
+            "description": description,
+            "quantity": len(hecs),
+            "total_energy_kwh": total_energy,
+            "price_per_kwh_brl": price_per_kwh,
+            "period_start": period_start,
+            "period_end": period_end,
+        },
+        "certificates": [
+            {
+                "hec_id": str(hec.hec_id),
+                "energy_kwh": float(hec.energy_kwh),
+                "certificate_hash": hec.hash_sha256,
+                "ipfs_json_cid": hec.ipfs_json_cid,
+                "registry_tx_hash": hec.registry_tx_hash,
+            }
+            for hec in hecs
+        ],
+        "metadata": {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "schema_version": "1.0",
+            "methodology_version": "HEC-CUSTODY-1.0",
+        },
+    }
+
 
 def create_lot(
     db: Session,
@@ -106,35 +135,9 @@ def create_lot(
     description: Optional[str] = None,
     price_per_kwh: Optional[float] = None,
 ) -> LotCreationResult:
-    """
-    Cria um lote de HECs backed.
-
-    Pipeline:
-      1. Busca todos os HECs
-      2. Valida backing completo de cada um
-      3. Valida que nenhum está em outro lote
-      4. Cria HECLot com totais calculados
-      5. Atribui lot_id a cada HEC + status=listed
-      6. Retorna resultado
-
-    Args:
-        db: Sessão do banco
-        hec_ids: Lista de IDs dos HECs a incluir no lote
-        name: Nome do lote
-        description: Descrição opcional
-        price_per_kwh: Preço por kWh (opcional)
-
-    Returns:
-        LotCreationResult
-
-    Raises:
-        ValueError: Se lista vazia, HEC não encontrado, backing incompleto,
-                    ou HEC já em outro lote
-    """
     if not hec_ids:
-        raise ValueError("Lista de HEC IDs não pode ser vazia")
+        raise ValueError("HEC ID list cannot be empty")
 
-    # Remove duplicatas mantendo ordem
     seen = set()
     unique_ids = []
     for hid in hec_ids:
@@ -142,61 +145,80 @@ def create_lot(
             seen.add(hid)
             unique_ids.append(hid)
 
-    # 1. Buscar todos os HECs
-    hecs = []
+    hecs: List[HECCertificate] = []
     for hid in unique_ids:
-        hec = db.query(HECCertificate).filter(
-            HECCertificate.hec_id == hid
-        ).first()
-
+        hec = db.query(HECCertificate).filter(HECCertificate.hec_id == hid).first()
         if not hec:
-            raise ValueError(f"HEC {hid} não encontrado")
+            raise ValueError(f"HEC {hid} not found")
         hecs.append(hec)
 
-    # 2. Validar backing completo
     errors = []
     for hec in hecs:
         err = validate_hec_backing(hec)
         if err:
             errors.append(err)
-
-    if errors:
-        raise ValueError(
-            f"Backing incompleto para {len(errors)} HEC(s):\n"
-            + "\n".join(f"  • {e}" for e in errors)
-        )
-
-    # 3. Validar não está em outro lote
-    for hec in hecs:
         err = validate_hec_not_in_lot(hec)
         if err:
-            raise ValueError(err)
+            errors.append(err)
+    if errors:
+        raise ValueError("Lot creation validation failed:\n" + "\n".join(f"- {err}" for err in errors))
 
-    # 4. Calcular totais
-    total_energy = sum(float(hec.energy_kwh) for hec in hecs)
-    qty = len(hecs)
-
-    # 5. Criar lote
     lot_id = uuid.uuid4()
+    qty = len(hecs)
+    total_energy = sum(float(hec.energy_kwh) for hec in hecs)
+    period_start, period_end = _derive_period_bounds(hecs)
+    manifest = build_lot_manifest(
+        lot_id=lot_id,
+        name=name,
+        description=description,
+        hecs=hecs,
+        price_per_kwh=price_per_kwh,
+        period_start=period_start,
+        period_end=period_end,
+    )
+    batch_hash = _canonical_json_hash(manifest)
+    manifest_upload = upload_json_document_to_ipfs(
+        payload=manifest,
+        document_id=str(lot_id),
+        filename_prefix="hec-lot-manifest",
+    )
+    total_units = qty * UNIT_SCALE
+    issuance = issue_inventory_batch_on_chain(
+        batch_hash_hex=batch_hash,
+        manifest_cid=manifest_upload.json_cid,
+        period_start=period_start,
+        period_end=period_end,
+        total_units=total_units,
+        methodology_version="HEC-CUSTODY-1.0",
+        schema_version="1.0",
+    )
+
     lot = HECLot(
         lot_id=lot_id,
         name=name,
         description=description,
+        lot_manifest_json=manifest,
+        lot_manifest_cid=manifest_upload.json_cid,
+        batch_hash=batch_hash,
+        onchain_batch_token_id=issuance.batch_token_id,
+        onchain_total_units=total_units,
+        onchain_issued_tx_hash=issuance.tx_hash,
+        onchain_issued_block=issuance.block_number,
+        custody_mode="platform_custody",
+        transferability_policy="non_transferable",
+        inventory_status="issued",
         total_energy_kwh=Decimal(str(total_energy)),
         total_quantity=qty,
         available_quantity=qty,
         certificate_count=qty,
-        price_per_kwh=Decimal(str(price_per_kwh)) if price_per_kwh else None,
+        price_per_kwh=Decimal(str(price_per_kwh)) if price_per_kwh is not None else None,
         status="open",
     )
     db.add(lot)
 
-    # 6. Atribuir lot_id a cada HEC
     for hec in hecs:
         hec.lot_id = lot_id
-        hec.status = "listed"
-
-    # Don't commit — caller controls transaction
+        hec.status = "custodied"
 
     return LotCreationResult(
         lot_id=lot_id,
@@ -207,6 +229,13 @@ def create_lot(
         total_energy_kwh=total_energy,
         certificate_count=qty,
         status="open",
+        custody_mode="platform_custody",
+        transferability_policy="non_transferable",
+        inventory_status="issued",
+        batch_hash=batch_hash,
+        manifest_cid=manifest_upload.json_cid,
+        onchain_batch_token_id=issuance.batch_token_id,
+        onchain_issued_tx_hash=issuance.tx_hash,
         hec_ids=[str(hec.hec_id) for hec in hecs],
         created_at=datetime.now(timezone.utc),
     )

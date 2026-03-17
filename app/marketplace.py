@@ -1,46 +1,19 @@
 """
-Serviço Marketplace — Compra atômica de HECs em lotes.
-
-Regras de negócio:
-  1. Só lotes com status "open" + backing completo podem ser comprados
-  2. quantity <= available_quantity (não pode exceder disponível)
-  3. Comprador deve ter saldo suficiente na wallet
-  4. Transação atômica: debita saldo, credita HECs, decrementa available
-  5. Se available_quantity chega a 0 → lot.status = "sold"
-
-Fluxo atômico (tudo ou nada):
-  1. Valida lote (open, backed, available)
-  2. Calcula preço total (quantity × avg_kwh × price_per_kwh)
-  3. Valida saldo do comprador
-  4. BEGIN TRANSACTION
-     a. Debita wallet.balance_brl
-     b. Credita wallet.hec_balance + energy_balance_kwh
-     c. Decrementa lot.available_quantity
-     d. Atualiza lot.status se esgotado
-     e. Marca HECs comprados como "sold"
-     f. Cria Transaction record
-  5. COMMIT (ou ROLLBACK em qualquer falha)
+Marketplace service for custody-backed HEC allocation.
 """
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from typing import List, Optional
+from typing import List
 
 from sqlalchemy.orm import Session
 
-from app.models.models import (
-    HECCertificate, HECLot, User, Wallet, Transaction,
-)
+from app.models.models import HECCertificate, HECLot, InventoryPosition, User, Wallet, Transaction
 
-
-# ---------------------------------------------------------------------------
-# Resultado
-# ---------------------------------------------------------------------------
 
 @dataclass
 class BuyResult:
-    """Resultado de uma compra."""
     tx_id: uuid.UUID
     buyer_id: uuid.UUID
     lot_id: uuid.UUID
@@ -53,12 +26,8 @@ class BuyResult:
     wallet_energy_after: float
     lot_available_after: int
     lot_status_after: str
-    status: str  # "completed"
+    status: str
 
-
-# ---------------------------------------------------------------------------
-# Buy HECs from lot
-# ---------------------------------------------------------------------------
 
 def buy_from_lot(
     db: Session,
@@ -66,117 +35,71 @@ def buy_from_lot(
     lot_id: uuid.UUID,
     quantity: int,
 ) -> BuyResult:
-    """
-    Compra atômica de HECs de um lote.
-
-    Transação atômica:
-      1. Valida lote (open, backed, available)
-      2. Calcula preço total
-      3. Valida saldo do comprador
-      4. Debita wallet, credita HECs, decrementa lote
-      5. Marca HECs como "sold"
-      6. Cria Transaction record
-
-    Args:
-        db: Sessão do banco
-        buyer_id: ID do comprador
-        lot_id: ID do lote
-        quantity: Quantidade de HECs a comprar
-
-    Returns:
-        BuyResult
-
-    Raises:
-        ValueError: Validações de negócio
-    """
     if quantity <= 0:
-        raise ValueError("Quantidade deve ser > 0")
+        raise ValueError("Quantity must be > 0")
 
-    # 1. Buscar e validar lote
     lot = db.query(HECLot).filter(HECLot.lot_id == lot_id).first()
     if not lot:
-        raise ValueError(f"Lote {lot_id} não encontrado")
-
-    if lot.status not in ("open",):
-        raise ValueError(
-            f"Lote {lot_id} não está aberto para venda "
-            f"(status: {lot.status})"
-        )
-
-    if not lot.price_per_kwh or lot.price_per_kwh <= 0:
-        raise ValueError(
-            f"Lote {lot_id} não possui preço definido — "
-            f"defina price_per_kwh antes de vender"
-        )
-
-    # 2. Verificar available_quantity
+        raise ValueError(f"Lot {lot_id} not found")
+    if lot.status != "open":
+        raise ValueError(f"Lot {lot_id} is not open for sale (status: {lot.status})")
+    if lot.inventory_status != "issued" or not lot.onchain_batch_token_id:
+        raise ValueError(f"Lot {lot_id} does not have issued custody inventory")
+    if lot.price_per_kwh is None or lot.price_per_kwh <= 0:
+        raise ValueError(f"Lot {lot_id} has no valid price_per_kwh")
     if quantity > lot.available_quantity:
         raise ValueError(
-            f"Quantidade solicitada ({quantity}) excede disponível "
-            f"({lot.available_quantity}) no lote {lot_id}"
+            f"Requested quantity ({quantity}) exceeds available_quantity ({lot.available_quantity})"
         )
 
-    # 3. Buscar comprador + wallet
     buyer = db.query(User).filter(User.user_id == buyer_id).first()
     if not buyer:
-        raise ValueError(f"Comprador {buyer_id} não encontrado")
+        raise ValueError(f"Buyer {buyer_id} not found")
     if not buyer.is_active:
-        raise ValueError("Conta do comprador desativada")
+        raise ValueError("Buyer account is disabled")
 
     wallet = db.query(Wallet).filter(Wallet.user_id == buyer_id).first()
     if not wallet:
-        raise ValueError(f"Wallet do comprador {buyer_id} não encontrada")
+        raise ValueError(f"Wallet for buyer {buyer_id} not found")
 
-    # 4. Selecionar HECs do lote (os primeiros `quantity` disponíveis)
-    available_hecs = (
+    available_hecs: List[HECCertificate] = (
         db.query(HECCertificate)
         .filter(
             HECCertificate.lot_id == lot_id,
-            HECCertificate.status == "listed",
+            HECCertificate.status == "custodied",
         )
+        .order_by(HECCertificate.created_at.asc())
         .limit(quantity)
         .all()
     )
-
     if len(available_hecs) < quantity:
         raise ValueError(
-            f"Apenas {len(available_hecs)} HECs disponíveis no lote, "
-            f"solicitados: {quantity}"
+            f"Only {len(available_hecs)} custodied HECs are available in lot {lot_id}"
         )
 
-    # 5. Calcular preço
-    total_energy = sum(float(h.energy_kwh) for h in available_hecs)
+    total_energy = sum(float(hec.energy_kwh) for hec in available_hecs)
     unit_price = Decimal(str(lot.price_per_kwh))
     total_price = (unit_price * Decimal(str(total_energy))).quantize(
-        Decimal("0.01"), rounding=ROUND_HALF_UP
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
     )
-
-    # 6. Validar saldo
     if wallet.balance_brl < total_price:
         raise ValueError(
-            f"Saldo insuficiente — necessário: R$ {total_price}, "
-            f"disponível: R$ {wallet.balance_brl}"
+            f"Insufficient wallet balance - required: R$ {total_price}, available: R$ {wallet.balance_brl}"
         )
 
-    # ════════════════════════════════════════════════════════════
-    # TRANSAÇÃO ATÔMICA — tudo ou nada
-    # ════════════════════════════════════════════════════════════
-
-    # a. Debitar wallet
     wallet.balance_brl -= total_price
     wallet.hec_balance += quantity
     wallet.energy_balance_kwh += Decimal(str(total_energy))
 
-    # b. Decrementar lote
     lot.available_quantity -= quantity
     if lot.available_quantity == 0:
-        lot.status = "sold"
+        lot.status = "closed"
 
-    # c. Marcar HECs como sold
+    source_hec_ids = [str(hec.hec_id) for hec in available_hecs]
     for hec in available_hecs:
-        hec.status = "sold"
+        hec.status = "allocated"
 
-    # d. Criar Transaction record
     tx_id = uuid.uuid4()
     tx = Transaction(
         tx_id=tx_id,
@@ -186,11 +109,26 @@ def buy_from_lot(
         energy_kwh=Decimal(str(total_energy)),
         unit_price_brl=unit_price,
         total_price_brl=total_price,
+        source_hec_ids=source_hec_ids,
         status="completed",
     )
     db.add(tx)
 
-    # Don't commit — caller controls transaction
+    position = InventoryPosition(
+        position_id=uuid.uuid4(),
+        wallet_id=wallet.wallet_id,
+        user_id=buyer_id,
+        lot_id=lot_id,
+        transaction_id=tx_id,
+        quantity=quantity,
+        available_quantity=quantity,
+        retired_quantity=0,
+        energy_kwh_total=Decimal(str(total_energy)),
+        energy_kwh_available=Decimal(str(total_energy)),
+        source_hec_ids=source_hec_ids,
+        status="active",
+    )
+    db.add(position)
 
     return BuyResult(
         tx_id=tx_id,

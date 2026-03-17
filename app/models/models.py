@@ -199,7 +199,7 @@ class HECCertificate(Base):
                             comment="Timestamp do registro on-chain")
     status = Column(
         String(20), nullable=False, default="pending",
-        comment="pending | registered | minted | listed | sold | retired",
+        comment="pending | registered | minted | custodied | allocated | retired",
     )
     minted_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -218,6 +218,25 @@ class HECLot(Base):
     lot_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
+    lot_manifest_json = Column(JSONB, nullable=True, comment="Manifesto canônico do lote em custódia")
+    lot_manifest_cid = Column(String(100), nullable=True, comment="CID IPFS do manifesto do lote")
+    batch_hash = Column(String(64), nullable=True, comment="SHA-256 do manifesto canônico do lote")
+    onchain_batch_token_id = Column(Integer, nullable=True, comment="Token ID do lote no contrato HECInventory1155")
+    onchain_total_units = Column(Integer, nullable=True, comment="Total emitido on-chain em mHEC")
+    onchain_issued_tx_hash = Column(String(66), nullable=True, comment="Tx hash de emissão do lote no inventory contract")
+    onchain_issued_block = Column(Integer, nullable=True, comment="Bloco da emissão do lote no inventory contract")
+    custody_mode = Column(
+        String(30), nullable=False, default="platform_custody",
+        comment="platform_custody | external_custody",
+    )
+    transferability_policy = Column(
+        String(30), nullable=False, default="non_transferable",
+        comment="non_transferable | protocol_only",
+    )
+    inventory_status = Column(
+        String(20), nullable=False, default="pending",
+        comment="pending | issued | suspended | revoked",
+    )
     total_energy_kwh = Column(Numeric(16, 4), nullable=False, default=0,
                                comment="Soma total kWh de todos os HECs do lote")
     total_quantity = Column(Integer, nullable=False, default=0,
@@ -238,6 +257,8 @@ class HECLot(Base):
     # Relationships
     certificates = relationship("HECCertificate", back_populates="lot")
     transactions = relationship("Transaction", back_populates="lot")
+    inventory_positions = relationship("InventoryPosition", back_populates="lot")
+    retirement_events = relationship("RetirementEvent", back_populates="lot")
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +324,16 @@ class User(Base):
     )
     dashboard_snapshots = relationship(
         "ConsumerDashboardSnapshot",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    inventory_positions = relationship(
+        "InventoryPosition",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    retirement_events = relationship(
+        "RetirementEvent",
         back_populates="user",
         cascade="all, delete-orphan",
     )
@@ -405,6 +436,7 @@ class Wallet(Base):
     wallet_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"),
                      unique=True, nullable=False)
+    wallet_address = Column(String(42), nullable=True, comment="Endereço EVM opcional do titular econômico")
     balance_brl = Column(Numeric(16, 2), nullable=False, default=0,
                           comment="Saldo em BRL (centavos de precisão)")
     hec_balance = Column(Integer, nullable=False, default=0,
@@ -416,6 +448,11 @@ class Wallet(Base):
 
     # Relationships
     user = relationship("User", back_populates="wallet")
+    inventory_positions = relationship(
+        "InventoryPosition",
+        back_populates="wallet",
+        cascade="all, delete-orphan",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +474,7 @@ class Transaction(Base):
                              comment="Preço por kWh no momento da compra")
     total_price_brl = Column(Numeric(16, 2), nullable=False,
                               comment="Valor total da transação em BRL")
+    source_hec_ids = Column(JSONB, nullable=True, comment="HEC IDs alocados economicamente nesta transação")
     status = Column(String(20), nullable=False, default="completed",
                     comment="completed | cancelled | refunded")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -444,6 +482,34 @@ class Transaction(Base):
     # Relationships
     buyer = relationship("User", back_populates="transactions")
     lot = relationship("HECLot", back_populates="transactions")
+    inventory_positions = relationship("InventoryPosition", back_populates="transaction")
+
+
+# ---------------------------------------------------------------------------
+# INVENTORY_POSITIONS - Ledger off-chain de direitos econômicos por lote
+# ---------------------------------------------------------------------------
+class InventoryPosition(Base):
+    __tablename__ = "inventory_positions"
+
+    position_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    wallet_id = Column(UUID(as_uuid=True), ForeignKey("wallets.wallet_id"), nullable=False, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    lot_id = Column(UUID(as_uuid=True), ForeignKey("hec_lots.lot_id"), nullable=False, index=True)
+    transaction_id = Column(UUID(as_uuid=True), ForeignKey("transactions.tx_id"), nullable=True, index=True)
+    quantity = Column(Integer, nullable=False, comment="Quantidade total de HECs alocada ao usuário")
+    available_quantity = Column(Integer, nullable=False, comment="Quantidade ainda não aposentada")
+    retired_quantity = Column(Integer, nullable=False, default=0, comment="Quantidade já aposentada")
+    energy_kwh_total = Column(Numeric(16, 4), nullable=False, comment="Energia total da posição")
+    energy_kwh_available = Column(Numeric(16, 4), nullable=False, comment="Energia remanescente da posição")
+    source_hec_ids = Column(JSONB, nullable=True, comment="HEC IDs que lastreiam a posição econômica")
+    status = Column(String(20), nullable=False, default="active", comment="active | exhausted")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    wallet = relationship("Wallet", back_populates="inventory_positions")
+    user = relationship("User", back_populates="inventory_positions")
+    lot = relationship("HECLot", back_populates="inventory_positions")
+    transaction = relationship("Transaction", back_populates="inventory_positions")
 
 
 # ---------------------------------------------------------------------------
@@ -459,6 +525,7 @@ class BurnCertificate(Base):
                       comment="Qtde de HECs queimados")
     energy_kwh = Column(Numeric(16, 4), nullable=False,
                          comment="Total kWh queimado")
+    retired_mhec = Column(Integer, nullable=False, default=0, comment="Quantidade aposentada em mHEC")
     certificate_json = Column(JSONB, nullable=True,
                                comment="JSON canônico do burn certificate")
     hash_sha256 = Column(String(64), unique=True, nullable=False,
@@ -475,9 +542,15 @@ class BurnCertificate(Base):
     registry_block = Column(Integer, nullable=True)
     contract_address = Column(String(42), nullable=True)
     chain = Column(String(20), nullable=True, default="polygon-amoy")
+    claimant_wallet = Column(String(42), nullable=True, comment="Wallet do claimant econômico, se fornecida")
+    beneficiary_ref = Column(String(255), nullable=True, comment="Identificador econômico/off-chain do beneficiário")
+    beneficiary_ref_hash = Column(String(64), nullable=True, comment="Hash SHA-256 do identificador econômico")
+    external_operation_id = Column(String(100), nullable=True, comment="ID externo idempotente da operação de aposentadoria")
     # HECs burned (list of hec_ids)
     burned_hec_ids = Column(JSONB, nullable=True,
                              comment="Lista de hec_ids queimados")
+    retirement_event_ids = Column(JSONB, nullable=True, comment="Lista dos retirement_event_ids cobertos por este recibo")
+    receipt_token_ids = Column(JSONB, nullable=True, comment="Lista dos receipt token IDs emitidos on-chain")
     status = Column(String(20), nullable=False, default="burned",
                     comment="burned (irreversível)")
     reason = Column(Text, nullable=True,
@@ -487,6 +560,40 @@ class BurnCertificate(Base):
 
     # Relationships
     user = relationship("User", back_populates="burns")
+    retirement_events = relationship("RetirementEvent", back_populates="burn")
+
+
+# ---------------------------------------------------------------------------
+# RETIREMENT_EVENTS - Registro auditável da aposentadoria por lote/batch
+# ---------------------------------------------------------------------------
+class RetirementEvent(Base):
+    __tablename__ = "retirement_events"
+
+    retirement_event_id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    burn_id = Column(UUID(as_uuid=True), ForeignKey("burn_certificates.burn_id"), nullable=True, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.user_id"), nullable=False, index=True)
+    lot_id = Column(UUID(as_uuid=True), ForeignKey("hec_lots.lot_id"), nullable=False, index=True)
+    batch_token_id = Column(Integer, nullable=True, comment="Token ID do lote no contrato HECInventory1155")
+    amount_hec = Column(Integer, nullable=False, comment="Quantidade aposentada em HEC inteiro")
+    amount_mhec = Column(Integer, nullable=False, comment="Quantidade aposentada em mHEC")
+    claimant_wallet = Column(String(42), nullable=True, comment="Wallet do claimant econômico")
+    beneficiary_ref = Column(String(255), nullable=True, comment="Identificador econômico/off-chain do beneficiário")
+    beneficiary_ref_hash = Column(String(64), nullable=True, comment="Hash SHA-256 do identificador do beneficiário")
+    external_operation_id = Column(String(100), nullable=True, comment="ID externo idempotente da operação")
+    protocol_operator = Column(String(50), nullable=False, default="platform_custody", comment="Operador que executou a aposentadoria")
+    onchain_retirement_id = Column(Integer, nullable=True, comment="Retirement ID retornado pelo contrato")
+    receipt_token_id = Column(Integer, nullable=True, comment="Receipt token ID emitido pelo contrato")
+    receipt_contract_address = Column(String(42), nullable=True, comment="Contrato do recibo soulbound")
+    retirement_tx_hash = Column(String(66), nullable=True, comment="Tx hash da aposentadoria on-chain")
+    retirement_block = Column(Integer, nullable=True, comment="Bloco da aposentadoria on-chain")
+    source_hec_ids = Column(JSONB, nullable=True, comment="HEC IDs off-chain consumidos neste retirement event")
+    status = Column(String(20), nullable=False, default="retired", comment="retired | failed")
+    retired_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    burn = relationship("BurnCertificate", back_populates="retirement_events")
+    user = relationship("User", back_populates="retirement_events")
+    lot = relationship("HECLot", back_populates="retirement_events")
 
 
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ solc_version = "0.8.20"
 # Optimization settings
 optimizer = true
 optimizer_runs = 200
+via_ir = true
 
 # EVM version
 evm_version = "paris"

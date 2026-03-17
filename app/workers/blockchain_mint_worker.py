@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+﻿from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.blockchain import register_on_chain
@@ -13,7 +13,7 @@ def _process_pending_hecs(logger, db: Session) -> int:
         .filter(
             HECCertificate.registry_tx_hash.is_(None),
             HECCertificate.ipfs_json_cid.isnot(None),
-            HECCertificate.status.in_(["pending", "minted", "listed"]),
+            HECCertificate.status.in_(["pending", "minted", "custodied", "allocated"]),
         )
         .order_by(HECCertificate.created_at.asc())
         .limit(settings.WORKER_BATCH_SIZE)
@@ -62,3 +62,4 @@ def run():
 
 if __name__ == "__main__":
     run()
+

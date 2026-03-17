@@ -1,9 +1,5 @@
 """
-Endpoints Lots — Criação e consulta de lotes HEC backed.
-
-POST /lots/create    — Criar lote com HECs backed (backing completo obrigatório)
-GET  /lots/{lot_id}  — Consultar lote por ID
-GET  /lots           — Listar todos os lotes
+Lot API for custody inventory creation and lookup.
 """
 from uuid import UUID
 
@@ -11,32 +7,31 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models.models import HECCertificate, HECLot
-from app.schemas.lot import LotCreateRequest, LotResponse, LotCertificateSummary
 from app.lot_service import create_lot
+from app.models.models import HECLot
+from app.schemas.lot import LotCertificateSummary, LotCreateRequest, LotResponse
 
 router = APIRouter(prefix="/lots", tags=["HEC Lots"])
 
 
 def _build_lot_response(lot: HECLot, include_certs: bool = True, message: str = "") -> LotResponse:
-    """Build consistent LotResponse from DB record."""
     certs = None
     if include_certs and lot.certificates:
         certs = [
             LotCertificateSummary(
-                hec_id=c.hec_id,
-                energy_kwh=float(c.energy_kwh),
-                certificate_hash=c.hash_sha256,
-                ipfs_json_cid=c.ipfs_json_cid,
-                registry_tx_hash=c.registry_tx_hash,
-                status=c.status,
+                hec_id=cert.hec_id,
+                energy_kwh=float(cert.energy_kwh),
+                certificate_hash=cert.hash_sha256,
+                ipfs_json_cid=cert.ipfs_json_cid,
+                registry_tx_hash=cert.registry_tx_hash,
+                status=cert.status,
             )
-            for c in lot.certificates
+            for cert in lot.certificates
         ]
 
-    all_backed = all(
-        c.registry_tx_hash is not None and c.ipfs_json_cid is not None
-        for c in (lot.certificates or [])
+    all_backed = bool(lot.onchain_issued_tx_hash) and all(
+        cert.registry_tx_hash is not None and cert.ipfs_json_cid is not None
+        for cert in (lot.certificates or [])
     )
 
     return LotResponse(
@@ -46,34 +41,27 @@ def _build_lot_response(lot: HECLot, include_certs: bool = True, message: str = 
         total_quantity=lot.total_quantity,
         available_quantity=lot.available_quantity,
         total_energy_kwh=float(lot.total_energy_kwh),
-        price_per_kwh=float(lot.price_per_kwh) if lot.price_per_kwh else None,
+        price_per_kwh=float(lot.price_per_kwh) if lot.price_per_kwh is not None else None,
         status=lot.status,
+        custody_mode=lot.custody_mode,
+        transferability_policy=lot.transferability_policy,
+        inventory_status=lot.inventory_status,
+        batch_hash=lot.batch_hash,
+        lot_manifest_cid=lot.lot_manifest_cid,
+        onchain_batch_token_id=lot.onchain_batch_token_id,
+        onchain_issued_tx_hash=lot.onchain_issued_tx_hash,
         certificates=certs,
         backing_complete=all_backed,
-        created_at=lot.created_at.isoformat() + "Z",
-        message=message or f"Lote {lot.status.upper()} — {lot.total_quantity} HECs, {float(lot.total_energy_kwh):.4f} kWh",
+        created_at=lot.created_at.isoformat() + 'Z',
+        message=message or (
+            f"Lot {lot.status.upper()} | qty={lot.total_quantity} | "
+            f"custody={lot.custody_mode} | inventory={lot.inventory_status}"
+        ),
     )
 
 
-@router.post(
-    "/create",
-    response_model=LotResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Criar lote de HECs backed",
-    description=(
-        "Cria um lote agrupando HECs com backing completo. "
-        "Cada HEC DEVE ter: status=registered, ipfs_cid, registry_tx_hash. "
-        "Bloqueia criação sem backing completo."
-    ),
-)
+@router.post('/create', response_model=LotResponse, status_code=status.HTTP_201_CREATED)
 def create_lot_endpoint(req: LotCreateRequest, db: Session = Depends(get_db)):
-    """
-    Validações:
-      1. Todos os HEC IDs devem existir
-      2. Todos devem ter backing completo (registered + IPFS + on-chain)
-      3. Nenhum pode estar em outro lote
-      4. Lista não pode ser vazia
-    """
     try:
         result = create_lot(
             db=db,
@@ -83,75 +71,38 @@ def create_lot_endpoint(req: LotCreateRequest, db: Session = Depends(get_db)):
             price_per_kwh=req.price_per_kwh,
         )
         db.commit()
-    except ValueError as e:
-        err_msg = str(e)
-
-        # Determine appropriate HTTP status
-        if "não encontrado" in err_msg:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=err_msg,
-            )
-        elif "já pertence" in err_msg:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=err_msg,
-            )
-        elif "Backing incompleto" in err_msg or "vazia" in err_msg:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=err_msg,
-            )
+    except ValueError as exc:
+        err = str(exc)
+        if 'not found' in err:
+            code = status.HTTP_404_NOT_FOUND
+        elif 'already belongs' in err:
+            code = status.HTTP_409_CONFLICT
         else:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=err_msg,
-            )
+            code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        raise HTTPException(status_code=code, detail=err)
 
-    # Fetch lot with certificates for response
     lot = db.query(HECLot).filter(HECLot.lot_id == result.lot_id).first()
-
     return _build_lot_response(
         lot,
         message=(
-            f"Lote criado — {result.total_quantity} HECs, "
-            f"{result.total_energy_kwh:.4f} kWh total, "
-            f"backing completo ✓"
+            f"Custody lot created with {result.total_quantity} HEC, "
+            f"batch token {result.onchain_batch_token_id}, manifest {result.manifest_cid}"
         ),
     )
 
 
-@router.get(
-    "/{lot_id}",
-    response_model=LotResponse,
-    summary="Consultar lote por ID",
-)
+@router.get('/{lot_id}', response_model=LotResponse)
 def get_lot(lot_id: UUID, db: Session = Depends(get_db)):
-    """Retorna dados do lote com resumo dos HECs."""
     lot = db.query(HECLot).filter(HECLot.lot_id == lot_id).first()
-
     if not lot:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Lote {lot_id} não encontrado",
-        )
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Lot {lot_id} not found")
     return _build_lot_response(lot)
 
 
-@router.get(
-    "",
-    response_model=list[LotResponse],
-    summary="Listar todos os lotes",
-)
-def list_lots(
-    status_filter: str = None,
-    db: Session = Depends(get_db),
-):
-    """Lista todos os lotes, opcionalmente filtrado por status."""
+@router.get('', response_model=list[LotResponse])
+def list_lots(status_filter: str = None, db: Session = Depends(get_db)):
     query = db.query(HECLot)
     if status_filter:
         query = query.filter(HECLot.status == status_filter)
     lots = query.order_by(HECLot.created_at.desc()).all()
-
     return [_build_lot_response(lot, include_certs=False) for lot in lots]

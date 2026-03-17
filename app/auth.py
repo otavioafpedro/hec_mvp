@@ -103,6 +103,7 @@ def register_user(
     name: str,
     password: str,
     role: str = "buyer",
+    wallet_address: Optional[str] = None,
 ) -> tuple:
     """
     Registra novo usuário + cria wallet com saldo inicial.
@@ -130,6 +131,7 @@ def register_user(
     wallet = Wallet(
         wallet_id=uuid.uuid4(),
         user_id=user.user_id,
+        wallet_address=wallet_address,
         balance_brl=INITIAL_BALANCE_BRL,
         hec_balance=0,
         energy_balance_kwh=Decimal("0"),
@@ -171,6 +173,7 @@ def login_or_create_social_user(
     email: str,
     name: str,
     role: str = "buyer",
+    wallet_address: Optional[str] = None,
 ) -> tuple:
     """
     Login social:
@@ -218,12 +221,15 @@ def login_or_create_social_user(
         wallet = Wallet(
             wallet_id=uuid.uuid4(),
             user_id=user.user_id,
+            wallet_address=wallet_address,
             balance_brl=INITIAL_BALANCE_BRL,
             hec_balance=0,
             energy_balance_kwh=Decimal("0"),
         )
         db.add(wallet)
         db.flush()
+    elif wallet_address and not wallet.wallet_address:
+        wallet.wallet_address = wallet_address
 
     token = create_token(str(user.user_id), user.email)
     return user, wallet, token, created

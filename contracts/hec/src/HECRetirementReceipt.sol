@@ -5,12 +5,13 @@ import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {ERC721URIStorage} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
 import {ERC721} from "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 
-/**
- * @title HECRetirementReceipt
- * @notice Recibo soulbound (intransferível) emitido quando HECs são aposentados.
- * @dev Serve como prova permanente de claim/consumo ambiental.
- */
-contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
+interface IERC5192 {
+    event Locked(uint256 tokenId);
+
+    function locked(uint256 tokenId) external view returns (bool);
+}
+
+contract HECRetirementReceipt is ERC721URIStorage, AccessControl, IERC5192 {
     bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
     uint256 private _nextId = 1;
 
@@ -22,7 +23,7 @@ contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
         uint256 amountUnits;
         uint64 retiredAt;
         string retirementReference;
-        string beneficiaryName;
+        string beneficiaryRefHash;
         string purpose;
     }
 
@@ -38,7 +39,7 @@ contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
         uint256 batchTokenId,
         uint256 amountUnits,
         string calldata retirementReference,
-        string calldata beneficiaryName,
+        string calldata beneficiaryRefHash,
         string calldata purpose
     ) external onlyRole(MINTER_ROLE) returns (uint256 receiptId) {
         receiptId = _nextId++;
@@ -50,9 +51,16 @@ contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
             amountUnits: amountUnits,
             retiredAt: uint64(block.timestamp),
             retirementReference: retirementReference,
-            beneficiaryName: beneficiaryName,
+            beneficiaryRefHash: beneficiaryRefHash,
             purpose: purpose
         });
+
+        emit Locked(receiptId);
+    }
+
+    function locked(uint256 tokenId) external view returns (bool) {
+        _requireOwned(tokenId);
+        return true;
     }
 
     function _update(
@@ -61,7 +69,6 @@ contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
         address auth
     ) internal override returns (address) {
         address from = _ownerOf(tokenId);
-        // Permitir minting (from == 0), mas bloquear transferências (from != 0)
         if (from != address(0) && to != address(0)) revert NonTransferable();
         return super._update(to, tokenId, auth);
     }
@@ -72,6 +79,6 @@ contract HECRetirementReceipt is ERC721URIStorage, AccessControl {
         override(AccessControl, ERC721URIStorage)
         returns (bool)
     {
-        return super.supportsInterface(interfaceId);
+        return interfaceId == type(IERC5192).interfaceId || super.supportsInterface(interfaceId);
     }
 }

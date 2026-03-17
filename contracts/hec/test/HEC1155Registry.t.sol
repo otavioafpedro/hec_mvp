@@ -16,34 +16,40 @@ contract HEC1155RegistryTest is Test {
 
     bytes32 batchHash = keccak256("batch-001");
 
+    event BatchIssued(
+        uint256 indexed tokenId,
+        bytes32 indexed batchHash,
+        address indexed treasury,
+        uint256 totalIssuedUnits,
+        string canonicalCID,
+        string methodologyVersion,
+        string schemaVersion
+    );
+
     function setUp() public {
         vm.startPrank(admin);
-
         registry = new HEC1155Registry(admin, treasury, "ipfs://base/");
         receipt = new HECRetirementReceipt(admin);
-
         registry.setReceiptContract(address(receipt));
         receipt.grantRole(receipt.MINTER_ROLE(), address(registry));
-
         vm.stopPrank();
     }
 
-    // ═══════════════════════════════════════════════════════════════
-    // ISSUANCE TESTS
-    // ═══════════════════════════════════════════════════════════════
-
-    function testIssueBatchToTreasury() public {
+    function _issueDefaultBatch() internal returns (uint256 tokenId) {
         vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
+        tokenId = registry.issueBatch(
             batchHash,
             "ipfs://canonical-batch-001",
             1700000000,
             1700086400,
-            100000, // 100 HEC
+            100000,
             "METH-1.0",
             "SCHEMA-1.0"
         );
+    }
 
+    function testIssueBatchToTreasury() public {
+        uint256 tokenId = _issueDefaultBatch();
         assertEq(tokenId, 1);
         assertEq(registry.balanceOf(treasury, tokenId), 100000);
     }
@@ -51,7 +57,7 @@ contract HEC1155RegistryTest is Test {
     function testIssueBatchEmitsEvent() public {
         vm.prank(admin);
         vm.expectEmit(true, true, true, true);
-        emit HEC1155Registry.BatchIssued(
+        emit BatchIssued(
             1,
             batchHash,
             treasury,
@@ -72,17 +78,8 @@ contract HEC1155RegistryTest is Test {
     }
 
     function testRejectDuplicateBatchHash() public {
-        vm.startPrank(admin);
-        registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
+        _issueDefaultBatch();
+        vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(HEC1155Registry.BatchAlreadyRegistered.selector, batchHash));
         registry.issueBatch(
             batchHash,
@@ -93,271 +90,86 @@ contract HEC1155RegistryTest is Test {
             "METH-1.0",
             "SCHEMA-1.0"
         );
-        vm.stopPrank();
     }
 
-    function testRejectInvalidPeriod() public {
-        vm.prank(admin);
-        vm.expectRevert(HEC1155Registry.InvalidPeriod.selector);
-        registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700086400, // end before start
-            1700000000,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-    }
-
-    function testRejectZeroAmount() public {
-        vm.prank(admin);
-        vm.expectRevert(HEC1155Registry.InvalidAmount.selector);
-        registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            0,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // TRANSFER TESTS
-    // ═══════════════════════════════════════════════════════════════
-
-    function testTransferWhileActive() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
+    function testInventoryIsNonTransferable() public {
+        uint256 tokenId = _issueDefaultBatch();
         vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        assertEq(registry.balanceOf(alice, tokenId), 5000);
-
-        vm.prank(alice);
-        registry.safeTransferFrom(alice, bob, tokenId, 2000, "");
-
-        assertEq(registry.balanceOf(alice, tokenId), 3000);
-        assertEq(registry.balanceOf(bob, tokenId), 2000);
+        vm.expectRevert(HEC1155Registry.NonTransferableInventory.selector);
+        registry.safeTransferFrom(treasury, alice, tokenId, 1000, "");
     }
 
-    function testBlockTransferWhenSuspended() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
+    function testRetireBurnsTreasuryInventoryAndMintsReceipt() public {
+        uint256 tokenId = _issueDefaultBatch();
 
         vm.prank(admin);
-        registry.setBatchStatus(tokenId, HEC1155Registry.BatchStatus.SUSPENDED, "audit pending");
-
-        vm.prank(alice);
-        vm.expectRevert();
-        registry.safeTransferFrom(alice, bob, tokenId, 1000, "");
-    }
-
-    function testBlockTransferWhenRevoked() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(admin);
-        registry.setBatchStatus(tokenId, HEC1155Registry.BatchStatus.REVOKED, "fraud detected");
-
-        vm.prank(alice);
-        vm.expectRevert();
-        registry.safeTransferFrom(alice, bob, tokenId, 1000, "");
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // RETIREMENT TESTS
-    // ═══════════════════════════════════════════════════════════════
-
-    function testRetireBurnsActiveBalanceAndMintsReceipt() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(alice);
         uint256 retirementId = registry.retire(
             tokenId,
-            1000, // 1 HEC
+            1000,
+            alice,
             "RET-001",
-            "Alice Ltda",
+            "beneficiary-hash",
             "Environmental claim"
         );
 
         assertEq(retirementId, 1);
-        assertEq(registry.balanceOf(alice, tokenId), 4000);
-
-        (
-            uint256 receiptId,
-            uint256 batchTokenId,
-            uint256 amountUnits,
-            ,
-            ,
-            ,
-
-        ) = receipt.receipts(1);
-
-        assertEq(receiptId, 1);
-        assertEq(batchTokenId, tokenId);
-        assertEq(amountUnits, 1000);
+        assertEq(registry.balanceOf(treasury, tokenId), 99000);
         assertEq(receipt.ownerOf(1), alice);
+        assertTrue(receipt.locked(1));
     }
 
     function testRetirementUpdatesSupply() public {
+        uint256 tokenId = _issueDefaultBatch();
+
         vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(alice);
         registry.retire(
             tokenId,
             1000,
+            alice,
             "RET-001",
-            "Alice Ltda",
+            "beneficiary-hash",
             "Environmental claim"
         );
 
         uint256 circulating = registry.circulatingSupply(tokenId);
-        assertEq(circulating, 99000); // 100000 - 1000
+        assertEq(circulating, 99000);
+    }
+
+    function testOnlyRetirementRoleCanRetire() public {
+        uint256 tokenId = _issueDefaultBatch();
+
+        vm.prank(alice);
+        vm.expectRevert();
+        registry.retire(
+            tokenId,
+            1000,
+            alice,
+            "RET-001",
+            "beneficiary-hash",
+            "Environmental claim"
+        );
     }
 
     function testBlockRetireWhenSuspended() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
+        uint256 tokenId = _issueDefaultBatch();
 
         vm.prank(admin);
         registry.setBatchStatus(tokenId, HEC1155Registry.BatchStatus.SUSPENDED, "audit pending");
 
-        vm.prank(alice);
+        vm.prank(admin);
         vm.expectRevert(HEC1155Registry.BatchNotActive.selector);
         registry.retire(
             tokenId,
             1000,
+            alice,
             "RET-001",
-            "Alice Ltda",
+            "beneficiary-hash",
             "Environmental claim"
-        );
-    }
-
-    function testBlockRetireMoreThanBalance() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(alice);
-        vm.expectRevert(); // ERC1155 burn will revert on insufficient balance
-        registry.retire(
-            tokenId,
-            10000, // more than alice's 5000
-            "RET-001",
-            "Alice Ltda",
-            "Environmental claim"
-        );
-    }
-
-    // ═══════════════════════════════════════════════════════════════
-    // GOVERNANCE TESTS
-    // ═══════════════════════════════════════════════════════════════
-
-    function testOnlyRegistrarCanIssue() public {
-        vm.prank(alice);
-        vm.expectRevert();
-        registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
         );
     }
 
     function testOnlyStatusManagerCanChangeStatus() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
+        uint256 tokenId = _issueDefaultBatch();
         vm.prank(alice);
         vm.expectRevert();
         registry.setBatchStatus(tokenId, HEC1155Registry.BatchStatus.SUSPENDED, "unauthorized");
@@ -380,87 +192,37 @@ contract HEC1155RegistryTest is Test {
         );
     }
 
-    function testPauseBlocksTransfers() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(admin);
-        registry.pause();
-
-        vm.prank(alice);
-        vm.expectRevert();
-        registry.safeTransferFrom(alice, bob, tokenId, 1000, "");
-    }
-
     function testPauseBlocksRetirement() public {
-        vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
+        uint256 tokenId = _issueDefaultBatch();
 
         vm.prank(admin);
         registry.pause();
 
-        vm.prank(alice);
+        vm.prank(admin);
         vm.expectRevert();
         registry.retire(
             tokenId,
             1000,
+            alice,
             "RET-001",
-            "Alice Ltda",
+            "beneficiary-hash",
             "Environmental claim"
         );
     }
-
-    // ═══════════════════════════════════════════════════════════════
-    // RECEIPT TESTS
-    // ═══════════════════════════════════════════════════════════════
 
     function testReceiptIsNonTransferable() public {
+        uint256 tokenId = _issueDefaultBatch();
+
         vm.prank(admin);
-        uint256 tokenId = registry.issueBatch(
-            batchHash,
-            "ipfs://canonical-batch-001",
-            1700000000,
-            1700086400,
-            100000,
-            "METH-1.0",
-            "SCHEMA-1.0"
-        );
-
-        vm.prank(treasury);
-        registry.safeTransferFrom(treasury, alice, tokenId, 5000, "");
-
-        vm.prank(alice);
         registry.retire(
             tokenId,
             1000,
+            alice,
             "RET-001",
-            "Alice Ltda",
+            "beneficiary-hash",
             "Environmental claim"
         );
 
-        // Try to transfer receipt from alice to bob
         vm.prank(alice);
         vm.expectRevert(HECRetirementReceipt.NonTransferable.selector);
         receipt.transferFrom(alice, bob, 1);

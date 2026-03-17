@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+﻿from datetime import datetime, timedelta
 from decimal import Decimal
 import re
 
@@ -109,7 +109,7 @@ def _format_capacity(capacity_kw: float | int | Decimal | None) -> str:
 
 def _infer_plant_type(name: str | None) -> str:
     normalized = (name or "").strip().lower()
-    if any(token in normalized for token in ("eolica", "eólica", "wind")):
+    if any(token in normalized for token in ("eolica", "eÃ³lica", "wind")):
         return "Eolica"
     if any(token in normalized for token in ("solar", "fotovoltaica", "fotovoltaico", "pv")):
         return "Solar"
@@ -526,14 +526,14 @@ def get_supplier_dashboard(
             func.count(HECCertificate.hec_id).label("hecs_emitted"),
             func.sum(
                 case(
-                    (HECCertificate.status.in_(("registered", "minted", "listed")), 1),
+                    (HECCertificate.status.in_(("registered", "minted", "custodied")), 1),
                     else_=0,
                 )
             ).label("hecs_available"),
             func.sum(
                 case(
                     (
-                        HECCertificate.status == "sold",
+                        HECCertificate.status.in_(("allocated", "retired")),
                         HECCertificate.energy_kwh * func.coalesce(HECLot.price_per_kwh, 0),
                     ),
                     else_=0,
@@ -665,7 +665,7 @@ def get_supplier_dashboard(
         total_price_brl = 0.0
         if lot and lot.price_per_kwh:
             total_price_brl = _as_float(hec.energy_kwh) * _as_float(lot.price_per_kwh)
-        status_value = "minted" if hec.status in ("sold", "retired", "minted", "registered") else "available"
+        status_value = "minted" if hec.status in ("allocated", "retired", "custodied", "minted", "registered") else "available"
         buyer_name = "-"
         if hec.lot_id in buyer_by_lot:
             buyer_name = buyer_by_lot[hec.lot_id]
@@ -764,3 +764,4 @@ def get_supplier_dashboard(
         mint_candidates=mint_candidates_payload,
         generated_at=datetime.utcnow(),
     )
+
