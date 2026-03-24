@@ -1,10 +1,12 @@
 import uuid
 
 from app.models.models import (
+    ConsumerProfile,
     GeneratorInverterConnection,
     GeneratorProfile,
     Plant,
     User,
+    UserRoleBinding,
     Wallet,
 )
 
@@ -80,6 +82,26 @@ def test_generator_register_201(client, db_session):
     )
     assert connection is not None
     assert connection.provider_name == "growatt"
+
+    consumer_profile = (
+        db_session.query(ConsumerProfile)
+        .filter(ConsumerProfile.user_id == user.user_id)
+        .first()
+    )
+    assert consumer_profile is not None
+    assert consumer_profile.person_type == "PF"
+
+    bindings = {
+        binding.role_code: binding
+        for binding in (
+            db_session.query(UserRoleBinding)
+            .filter(UserRoleBinding.user_id == user.user_id)
+            .all()
+        )
+    }
+    assert set(bindings) == {"consumer", "generator"}
+    assert bindings["generator"].is_primary is True
+    assert bindings["consumer"].is_primary is False
 
 
 def test_generator_register_duplicate_document_409(client, db_session):
@@ -209,6 +231,18 @@ def test_activate_generator_profile_for_existing_consumer_201(client, db_session
     me = client.get("/generator-onboarding/me", headers=_auth_header(token))
     assert me.status_code == 200
     assert me.json()["user_id"] == user_id
+
+    bindings = {
+        binding.role_code: binding
+        for binding in (
+            db_session.query(UserRoleBinding)
+            .filter(UserRoleBinding.user_id == uuid.UUID(user_id))
+            .all()
+        )
+    }
+    assert set(bindings) == {"consumer", "generator"}
+    assert bindings["consumer"].is_primary is True
+    assert bindings["generator"].is_primary is False
 
 
 def test_activate_generator_profile_twice_409(client, db_session):

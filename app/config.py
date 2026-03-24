@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     OAUTH_STATE_TTL_SECONDS: int = 600
     OAUTH_DEFAULT_FRONTEND_REDIRECT_URI: str = "http://localhost:3000/auth/social/callback"
     OAUTH_ALLOWED_REDIRECT_HOSTS: str = ""
+    CORS_ALLOWED_ORIGINS: str = "http://localhost:3000,http://localhost:5173"
     GOOGLE_CLIENT_ID: str = ""
     GOOGLE_CLIENT_SECRET: str = ""
     GOOGLE_REDIRECT_URI: str = ""
@@ -96,6 +97,14 @@ class Settings(BaseSettings):
         host = self.SOA_TIMESERIES_HOST or self.POSTGRES_HOST
         port = self.SOA_TIMESERIES_PORT or self.POSTGRES_PORT
         return f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
+
+    @property
+    def CORS_ALLOWED_ORIGINS_LIST(self) -> list[str]:
+        return [
+            origin.strip()
+            for origin in self.CORS_ALLOWED_ORIGINS.split(",")
+            if origin.strip()
+        ]
 
     class Config:
         env_file = ".env"

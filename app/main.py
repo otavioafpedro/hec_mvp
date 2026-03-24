@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.api.health import router as health_router
@@ -21,6 +22,15 @@ app = FastAPI(
         "Gera certificados HEC com lastro físico auditado."
     ),
 )
+
+if settings.CORS_ALLOWED_ORIGINS_LIST:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.CORS_ALLOWED_ORIGINS_LIST,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 app.include_router(health_router, tags=["Health"])
 app.include_router(telemetry_router, tags=["Telemetry"])

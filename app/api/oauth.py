@@ -27,6 +27,20 @@ LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
 
 
+def _format_oauth_error(exc: Exception) -> str:
+    raw = str(exc).strip() or exc.__class__.__name__
+    lowered = raw.lower()
+
+    if "wallets.wallet_address" in lowered and "does not exist" in lowered:
+        return (
+            "Banco desatualizado para OAuth social: falta a coluna wallets.wallet_address. "
+            "Rode a migration 020_inventory_custody_retirement com 'alembic upgrade head' "
+            "no banco usado pelo backend."
+        )
+
+    return raw
+
+
 def _provider_or_404(provider: str) -> str:
     normalized = (provider or "").strip().lower()
     if normalized not in {"google", "linkedin"}:
@@ -360,7 +374,7 @@ def social_callback(
             frontend_redirect_uri,
             {
                 "error": "oauth_login_failed",
-                "error_description": str(exc),
+                "error_description": _format_oauth_error(exc),
                 "provider": normalized_provider,
             },
         )
@@ -379,4 +393,3 @@ def social_callback(
         },
     )
     return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
-

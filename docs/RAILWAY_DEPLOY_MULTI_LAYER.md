@@ -44,8 +44,10 @@ DS_LOOKBACK_HOURS=24
 
 Notas:
 - `POSTGRES_DSN` aponta para o banco legado (`validation_engine`) usado por API/marketplace/hec/burn.
+- Identidade do usuario (`users`, `wallets`, `consumer_profiles`, `user_role_bindings`, `generator_profiles`) vive neste PostgreSQL.
 - `SOA_TIMESERIES_DSN` aponta para o banco de series temporais (`inverter_telemetry`, `energy_intervals`, etc).
 - `SOA_MYSQL_DSN` aponta para o banco transacional SOA (tabelas `sites`, `devices`, etc).
+- O MariaDB atual nao recebe espelho de usuarios; ele guarda somente entidades operacionais do SOA.
 - Se preferir, pode usar `POSTGRES_HOST/PORT/USER/PASSWORD/DB` em vez de `POSTGRES_DSN`.
 
 ## Configuracao por servico

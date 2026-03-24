@@ -1,6 +1,7 @@
 ﻿from datetime import datetime, timedelta
 from decimal import Decimal
 import re
+from uuid import UUID as UUIDType
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import register_user, verify_token
 from app.db.session import get_db
+from app.identity import ensure_consumer_identity
 from app.models.models import (
     GeneratorInverterConnection,
     GeneratorProfile,
@@ -235,7 +237,16 @@ def get_current_user(
             detail="Token invalido ou expirado",
         )
 
-    user = db.query(User).filter(User.user_id == payload.get("user_id")).first()
+    user_id = payload.get("user_id")
+    try:
+        user_uuid = UUIDType(str(user_id))
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token invalido: user_id malformado",
+        )
+
+    user = db.query(User).filter(User.user_id == user_uuid).first()
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -260,6 +271,7 @@ def register_generator(req: GeneratorRegisterRequest, db: Session = Depends(get_
             role="seller",
         )
         profile, plant, connection = _create_onboarding_entities(db=db, user=user, payload=req)
+        ensure_consumer_identity(db, user)
 
         db.commit()
         db.refresh(user)
@@ -309,6 +321,7 @@ def activate_generator_profile(
 
     try:
         profile, plant, connection = _create_onboarding_entities(db=db, user=user, payload=req)
+        ensure_consumer_identity(db, user)
         db.commit()
         db.refresh(profile)
         db.refresh(plant)

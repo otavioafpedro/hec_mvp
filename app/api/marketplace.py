@@ -1,6 +1,8 @@
 """
 Marketplace API for custody-backed inventory allocation.
 """
+from uuid import UUID as UUIDType
+
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -35,7 +37,13 @@ def get_current_user(
     if not payload:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-    user = db.query(User).filter(User.user_id == payload.get("user_id")).first()
+    user_id = payload.get("user_id")
+    try:
+        user_uuid = UUIDType(str(user_id))
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token: malformed user_id")
+
+    user = db.query(User).filter(User.user_id == user_uuid).first()
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     return user
@@ -63,7 +71,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
         token=token,
         wallet_balance_brl=float(wallet.balance_brl),
         wallet_address=wallet.wallet_address,
-        message=f"Account created. Initial wallet balance: R$ {float(wallet.balance_brl):.2f}",
+        message=f"Conta criada. Saldo inicial da wallet: R$ {float(wallet.balance_brl):.2f}",
     )
 
 
@@ -71,6 +79,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 def login(req: LoginRequest, db: Session = Depends(get_db)):
     try:
         user, token = login_user(db, email=req.email, password=req.password)
+        db.commit()
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
 
@@ -83,7 +92,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
         token=token,
         wallet_balance_brl=float(wallet.balance_brl) if wallet else 0.0,
         wallet_address=wallet.wallet_address if wallet else None,
-        message="Login successful",
+        message="Login realizado com sucesso",
     )
 
 

@@ -53,7 +53,7 @@ import pytest
 from app.auth import (
     hash_password, verify_password,
     create_token, verify_token,
-    register_user, login_user,
+    register_user, login_user, login_or_create_social_user,
     INITIAL_BALANCE_BRL,
 )
 from app.marketplace import buy_from_lot, BuyResult
@@ -61,7 +61,7 @@ from app.hec_generator import issue_hec
 from app.lot_service import create_lot
 from app.models.models import (
     Plant, Validation, HECCertificate, HECLot,
-    User, Wallet, Transaction,
+    ConsumerProfile, User, UserRoleBinding, Wallet, Transaction,
 )
 from app.security import canonical_payload, sign_payload
 from app.api.telemetry import set_server_now_fn, reset_server_now_fn
@@ -191,11 +191,106 @@ class TestAuthUnit:
         assert wallet.hec_balance == 0
         assert len(token) > 50
 
+        profile = (
+            db_session.query(ConsumerProfile)
+            .filter(ConsumerProfile.user_id == user.user_id)
+            .first()
+        )
+        assert profile is not None
+        assert profile.display_name == "New User"
+        assert profile.person_type == "PF"
+
+        bindings = {
+            binding.role_code: binding
+            for binding in (
+                db_session.query(UserRoleBinding)
+                .filter(UserRoleBinding.user_id == user.user_id)
+                .all()
+            )
+        }
+        assert set(bindings) == {"consumer"}
+        assert bindings["consumer"].is_primary is True
+
     def test_register_duplicate_raises(self, db_session):
         register_user(db_session, "dup@test.com", "A", "pass")
         db_session.commit()
         with pytest.raises(ValueError, match="já registrado"):
             register_user(db_session, "dup@test.com", "B", "pass")
+
+    def test_social_login_creates_consumer_identity(self, db_session):
+        user, wallet, token, created = login_or_create_social_user(
+            db_session,
+            "social@test.com",
+            "Social User",
+        )
+        db_session.commit()
+
+        assert created is True
+        assert user.email == "social@test.com"
+        assert wallet.balance_brl == INITIAL_BALANCE_BRL
+        assert len(token) > 50
+
+        profile = (
+            db_session.query(ConsumerProfile)
+            .filter(ConsumerProfile.user_id == user.user_id)
+            .first()
+        )
+        assert profile is not None
+        assert profile.display_name == "Social User"
+
+        bindings = (
+            db_session.query(UserRoleBinding)
+            .filter(UserRoleBinding.user_id == user.user_id)
+            .all()
+        )
+        assert len(bindings) == 1
+        assert bindings[0].role_code == "consumer"
+        assert bindings[0].is_primary is True
+
+    def test_login_backfills_missing_consumer_identity(self, db_session):
+        user = User(
+            user_id=uuid.uuid4(),
+            email="legacy@test.com",
+            name="Legacy User",
+            password_hash=hash_password("legacy123"),
+            role="buyer",
+            is_active=True,
+        )
+        db_session.add(user)
+        db_session.add(
+            Wallet(
+                wallet_id=uuid.uuid4(),
+                user_id=user.user_id,
+                balance_brl=INITIAL_BALANCE_BRL,
+                hec_balance=0,
+                energy_balance_kwh=Decimal("0"),
+            )
+        )
+        db_session.commit()
+
+        logged_user, token = login_user(db_session, "legacy@test.com", "legacy123")
+        db_session.commit()
+
+        assert logged_user.user_id == user.user_id
+        assert len(token) > 50
+
+        profile = (
+            db_session.query(ConsumerProfile)
+            .filter(ConsumerProfile.user_id == user.user_id)
+            .first()
+        )
+        assert profile is not None
+
+        binding = (
+            db_session.query(UserRoleBinding)
+            .filter(
+                UserRoleBinding.user_id == user.user_id,
+                UserRoleBinding.role_code == "consumer",
+            )
+            .first()
+        )
+        assert binding is not None
+        assert binding.is_primary is True
 
     def test_login_valid(self, db_session):
         register_user(db_session, "login@test.com", "L", "pass123")

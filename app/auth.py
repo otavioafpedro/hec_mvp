@@ -20,6 +20,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.identity import ensure_consumer_identity
 from app.models.models import User, Wallet
 
 
@@ -127,6 +128,7 @@ def register_user(
         is_active=True,
     )
     db.add(user)
+    ensure_consumer_identity(db, user)
 
     wallet = Wallet(
         wallet_id=uuid.uuid4(),
@@ -164,6 +166,7 @@ def login_user(
     if not user.is_active:
         raise ValueError("Conta desativada")
 
+    ensure_consumer_identity(db, user)
     token = create_token(str(user.user_id), email)
     return user, token
 
@@ -216,6 +219,7 @@ def login_or_create_social_user(
             user.is_active = True
         db.flush()
 
+    ensure_consumer_identity(db, user)
     wallet = db.query(Wallet).filter(Wallet.user_id == user.user_id).first()
     if not wallet:
         wallet = Wallet(

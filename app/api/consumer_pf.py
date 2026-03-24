@@ -11,6 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.auth import verify_token
 from app.db.session import get_db
+from app.identity import (
+    avatar_seed_from_name,
+    ensure_consumer_identity,
+    ensure_user_role_bindings,
+    infer_default_person_type,
+)
 from app.models.models import (
     AchievementCatalog,
     BurnCertificate,
@@ -18,7 +24,6 @@ from app.models.models import (
     ConsumerProfile,
     ConsumerRewardLedger,
     DNFTDefinition,
-    GeneratorProfile,
     User,
     UserAchievement,
     UserDNFTEvent,
@@ -187,12 +192,7 @@ def _normalize_document(document_id: str | None) -> str | None:
 
 
 def _avatar_from_name(name: str) -> str:
-    parts = [p for p in name.strip().split() if p]
-    if not parts:
-        return "SO"
-    if len(parts) == 1:
-        return parts[0][:2].upper()
-    return (parts[0][0] + parts[-1][0]).upper()
+    return avatar_seed_from_name(name)
 
 
 def _format_joined(dt: datetime | None) -> str:
@@ -303,49 +303,7 @@ def _sync_profile_from_burn_history(
 
 
 def _ensure_consumer_role(db: Session, user: User) -> None:
-    existing = (
-        db.query(UserRoleBinding)
-        .filter(
-            UserRoleBinding.user_id == user.user_id,
-            UserRoleBinding.role_code == "consumer",
-        )
-        .first()
-    )
-    if not existing:
-        db.add(
-            UserRoleBinding(
-                binding_id=uuid4(),
-                user_id=user.user_id,
-                role_code="consumer",
-                is_primary=True,
-                created_at=datetime.utcnow(),
-            )
-        )
-
-    has_generator_profile = (
-        db.query(GeneratorProfile)
-        .filter(GeneratorProfile.user_id == user.user_id)
-        .first()
-    )
-    if has_generator_profile:
-        gen_binding = (
-            db.query(UserRoleBinding)
-            .filter(
-                UserRoleBinding.user_id == user.user_id,
-                UserRoleBinding.role_code == "generator",
-            )
-            .first()
-        )
-        if not gen_binding:
-            db.add(
-                UserRoleBinding(
-                    binding_id=uuid4(),
-                    user_id=user.user_id,
-                    role_code="generator",
-                    is_primary=False,
-                    created_at=datetime.utcnow(),
-                )
-            )
+    ensure_user_role_bindings(db, user)
 
 
 def _ensure_catalog_seed(db: Session) -> None:
@@ -391,62 +349,11 @@ def _ensure_dnft_seed(db: Session) -> None:
 
 
 def _infer_default_person_type(db: Session, user: User) -> str:
-    generator_profile = (
-        db.query(GeneratorProfile.person_type)
-        .filter(GeneratorProfile.user_id == user.user_id)
-        .first()
-    )
-    if generator_profile and generator_profile[0] in {"PF", "PJ"}:
-        return generator_profile[0]
-
-    role_values = {
-        str(value or "").strip().lower()
-        for (value,) in (
-            db.query(UserRoleBinding.role_code)
-            .filter(UserRoleBinding.user_id == user.user_id)
-            .all()
-        )
-    }
-    role_values.add(str(user.role or "").strip().lower())
-    role_haystack = " ".join(sorted(role_values))
-
-    pj_hints = ("pj", "institutional", "corporate", "company")
-    if any(hint in role_haystack for hint in pj_hints):
-        return "PJ"
-
-    return "PF"
+    return infer_default_person_type(db, user)
 
 
 def _get_or_create_profile(db: Session, user: User) -> ConsumerProfile:
-    profile = (
-        db.query(ConsumerProfile)
-        .filter(ConsumerProfile.user_id == user.user_id)
-        .first()
-    )
-    if profile:
-        return profile
-
-    profile = ConsumerProfile(
-        profile_id=uuid4(),
-        user_id=user.user_id,
-        person_type=_infer_default_person_type(db, user),
-        display_name=user.name,
-        avatar_seed=_avatar_from_name(user.name),
-        plan_name="Ouro Verde",
-        premmia_id=f"PRM-{str(user.user_id).replace('-', '')[:7].upper()}",
-        premmia_points=0,
-        current_streak_days=0,
-        total_retired_mhec=0,
-        total_co2_avoided_tons=Decimal("0"),
-        total_trees_equivalent=0,
-        total_referrals=0,
-        joined_at=user.created_at or datetime.utcnow(),
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    db.add(profile)
-    db.flush()
-    return profile
+    return ensure_consumer_identity(db, user)
 
 
 def _dnft_progress_from_total(total_mhec: int, tiers: list[DNFTDefinition]):
